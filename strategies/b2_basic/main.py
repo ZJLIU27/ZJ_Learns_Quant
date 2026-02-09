@@ -444,11 +444,13 @@ def init(context):
     g.intraday_low = {}
     g.bought = set()
     g.pending_buy = {}
+    g.entry_check_stats = {}
     g.entry_price = {}
     g.buy_day_low = {}
     g.buy_date = {}
     g.take_profit_state = {}
     g.exit_checked = None
+    g.logged_once = set()
 
     # initialize universe
     try:
@@ -481,6 +483,8 @@ def handlebar(context):
         g.watchlist = []
         g.intraday_low = {}
         g.bought = set()
+        g.entry_check_stats = {}
+        g.logged_once = set()
 
         t_date = get_trading_calendar_prev_date(context, trade_date)
         g.daily_candidates = build_daily_candidates(context, t_date)
@@ -494,6 +498,9 @@ def handlebar(context):
     if (not g.watchlist_built) and now.time() >= WATCHLIST_TIME:
         g.watchlist = build_watchlist(context, trade_date, now)
         g.watchlist_built = True
+        _log("watchlist built size={0}".format(len(g.watchlist)))
+        if g.watchlist:
+            _log("watchlist sample={0}".format(",".join(g.watchlist[:5])))
 
     # Monitor watchlist for entry and retry pending orders
     for code in g.watchlist:
@@ -510,7 +517,14 @@ def handlebar(context):
         if code in g.bought:
             continue
 
+        st = g.entry_check_stats.get(code)
+        if st is None:
+            st = {"checks": 0, "hits": 0}
+            g.entry_check_stats[code] = st
+        st["checks"] += 1
+
         if should_buy_from_low(context, code, price):
+            st["hits"] += 1
             _try_place_buy(context, code, price, now)
 
         # If prior buy failed, retry at next minute with latest price
@@ -522,6 +536,7 @@ def handlebar(context):
 
     # Stop-loss and volume-based exit checks at 14:45
     if now.time() >= STOP_CHECK_TIME and g.exit_checked != trade_date:
+        _log_end_of_day_entry_stats(trade_date)
         _check_stop_rules(context, trade_date, now)
         g.exit_checked = trade_date
 
@@ -607,16 +622,42 @@ def build_daily_candidates(context, t_date):
 
 def build_watchlist(context, trade_date, now):
     ranked = []
+    stats = {
+        "total_candidates": len(g.daily_candidates),
+        "vol_ratio_none": 0,
+        "vol_ratio_low": 0,
+        "downtrend_fail": 0,
+    }
     for code in g.daily_candidates:
         vol_ratio = calc_volume_ratio(context, code, trade_date, now)
-        if vol_ratio is None or vol_ratio <= VOLUME_RATIO_MIN:
+        if vol_ratio is None:
+            stats["vol_ratio_none"] += 1
+            continue
+        if vol_ratio <= VOLUME_RATIO_MIN:
+            stats["vol_ratio_low"] += 1
             continue
         if not is_downtrend(context, code, trade_date, now):
+            stats["downtrend_fail"] += 1
             continue
         ranked.append((code, vol_ratio))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
-    return [code for code, _ in ranked[:WATCHLIST_SIZE]]
+    watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
+    _log(
+        "watchlist_stats total_candidates={0} vol_ratio_none={1} vol_ratio_low={2} "
+        "downtrend_fail={3} passed={4} selected={5}".format(
+            stats["total_candidates"],
+            stats["vol_ratio_none"],
+            stats["vol_ratio_low"],
+            stats["downtrend_fail"],
+            len(ranked),
+            len(watchlist),
+        )
+    )
+    if ranked:
+        top = ",".join(["{0}:{1:.2f}".format(c, v) for c, v in ranked[:5]])
+        _log("watchlist_rank_top={0}".format(top))
+    return watchlist
 
 
 def should_buy_from_low(context, code, price):
@@ -654,15 +695,35 @@ def _update_buy_day_low(context, code, trade_date):
 
 def _try_place_buy(context, code, price, now):
     if not ENABLE_TRADING:
+        _log_once(
+            "{0}|{1}|trading_disabled".format(now.strftime("%Y%m%d"), code),
+            "skip buy {0}: ENABLE_TRADING is False".format(code),
+        )
+        return
+
+    account_id = _get_account_id(context)
+    if not account_id:
+        _log_once(
+            "{0}|{1}|no_account".format(now.strftime("%Y%m%d"), code),
+            "skip buy {0}: account id is empty".format(code),
+        )
         return
 
     cash = None
     try:
         cash = get_available_cash(context)
     except Exception:
+        _log_once(
+            "{0}|{1}|cash_error".format(now.strftime("%Y%m%d"), code),
+            "skip buy {0}: get_available_cash failed".format(code),
+        )
         return
 
     if not cash or cash <= 0:
+        _log_once(
+            "{0}|{1}|no_cash".format(now.strftime("%Y%m%d"), code),
+            "skip buy {0}: available cash <= 0".format(code),
+        )
         return
 
     order_cash = min(cash, ORDER_CASH)
@@ -673,6 +734,7 @@ def _try_place_buy(context, code, price, now):
 
     if ok:
         g.bought.add(code)
+        _log("buy order accepted code={0} cash={1:.2f}".format(code, order_cash))
         if code in g.pending_buy:
             del g.pending_buy[code]
         if code not in g.entry_price:
@@ -687,6 +749,10 @@ def _try_place_buy(context, code, price, now):
         # Retry on next minute bar with latest price
         next_retry = now + datetime.timedelta(minutes=1)
         g.pending_buy[code] = next_retry
+        _log_once(
+            "{0}|{1}|order_fail".format(now.strftime("%Y%m%d"), code),
+            "buy order rejected code={0}, will retry".format(code),
+        )
 
 
 def _check_take_profit(context, now):
@@ -1069,6 +1135,25 @@ def _get_account_id(context):
     return globals().get("account", "")
 
 
+def _log_end_of_day_entry_stats(trade_date):
+    if not g.watchlist:
+        _log("entry_stats day={0} watchlist_empty".format(trade_date))
+        return
+
+    parts = []
+    for code in g.watchlist[:10]:
+        st = g.entry_check_stats.get(code, {})
+        checks = int(st.get("checks", 0))
+        hits = int(st.get("hits", 0))
+        parts.append("{0}:{1}/{2}".format(code, hits, checks))
+
+    _log(
+        "entry_stats day={0} bought={1} trigger_hits/checks {2}".format(
+            trade_date, len(g.bought), ",".join(parts)
+        )
+    )
+
+
 def _normalize_trade_date(value):
     """Normalize date-like value to YYYYMMDD."""
     if value is None:
@@ -1108,3 +1193,17 @@ def _log(msg):
         print("[{0}] {1}".format(STRATEGY_NAME, msg))
     except Exception:
         pass
+
+
+def _log_once(key, msg):
+    try:
+        logged = getattr(g, "logged_once", None)
+        if logged is None:
+            g.logged_once = set()
+            logged = g.logged_once
+        if key in logged:
+            return
+        logged.add(key)
+    except Exception:
+        pass
+    _log(msg)
