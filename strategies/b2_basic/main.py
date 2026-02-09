@@ -205,7 +205,7 @@ def fetch_daily_bars(context, code, end_date, count):
                 count=count,
                 dividend_type="none",
                 fill_data=True,
-                subscribe=False,
+                subscribe=True,
             )
             cur = data.get(code)
             if cur is not None and (not cur.empty):
