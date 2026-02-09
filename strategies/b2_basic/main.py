@@ -120,6 +120,7 @@ def fetch_daily_bars(context, code, end_date, count):
     Each bar is a dict with keys: date, open, high, low, close, volume
     date: "YYYYMMDD"
     """
+    end_date = _normalize_trade_date(end_date)
     data = context.get_market_data_ex(
         ["open", "high", "low", "close", "volume"],
         [code],
@@ -157,6 +158,10 @@ def fetch_minute_bars(context, code, trade_date, end_time, count):
     Each bar is a dict with keys: time, open, high, low, close, volume
     time: "HH:MM"
     """
+    trade_date = _normalize_trade_date(trade_date)
+    if not trade_date:
+        return []
+
     end_ts = trade_date + end_time.replace(":", "") + "00"
     data = context.get_market_data_ex(
         ["open", "high", "low", "close", "volume"],
@@ -320,10 +325,14 @@ def get_trading_calendar_prev_date(context, date_str):
 
     Default fallback only skips weekends; replace with QMT trading calendar.
     """
+    date_str = _normalize_trade_date(date_str)
+    if not date_str:
+        date_str = datetime.datetime.now().strftime("%Y%m%d")
+
     try:
         dates = context.get_trading_dates("SH", "", date_str, 2, "1d")
         if len(dates) >= 2:
-            return dates[-2]
+            return _normalize_trade_date(dates[-2])
     except Exception:
         pass
 
@@ -438,6 +447,17 @@ def handlebar(context):
 
 def build_daily_candidates(context, t_date):
     candidates = []
+    stats = {
+        "total": 0,
+        "bars_short": 0,
+        "kdj_t1_fail": 0,
+        "kdj_t_fail": 0,
+        "ret_fail": 0,
+        "vol_fail": 0,
+        "upper_shadow_fail": 0,
+    }
+    stats["total"] = len(g.universe)
+
     for code in g.universe:
         if not is_main_board_a_share(code):
             continue
@@ -449,6 +469,7 @@ def build_daily_candidates(context, t_date):
             continue
 
         if len(bars) < DAILY_KDJ_N + 2:
+            stats["bars_short"] += 1
             continue
 
         bar_t_minus1 = bars[-2]
@@ -462,19 +483,37 @@ def build_daily_candidates(context, t_date):
         j_t = j_list[-1]
 
         if j_t_minus1 >= J_T_MINUS1_MAX:
+            stats["kdj_t1_fail"] += 1
             continue
         if j_t >= J_T_MAX:
+            stats["kdj_t_fail"] += 1
             continue
 
         if not daily_return_ok(bar_t_minus1, bar_t):
+            stats["ret_fail"] += 1
             continue
         if bar_t["volume"] <= bar_t_minus1["volume"]:
+            stats["vol_fail"] += 1
             continue
         if upper_shadow_ratio(bar_t) >= UPPER_SHADOW_MAX_RATIO:
+            stats["upper_shadow_fail"] += 1
             continue
 
         candidates.append(code)
 
+    _log(
+        "daily_filter_stats total={0} bars_short={1} kdj_t1_fail={2} "
+        "kdj_t_fail={3} ret_fail={4} vol_fail={5} upper_shadow_fail={6} pass={7}".format(
+            stats["total"],
+            stats["bars_short"],
+            stats["kdj_t1_fail"],
+            stats["kdj_t_fail"],
+            stats["ret_fail"],
+            stats["vol_fail"],
+            stats["upper_shadow_fail"],
+            len(candidates),
+        )
+    )
     return candidates
 
 
@@ -915,10 +954,14 @@ def normalize_stock_code(stock_code):
 
 
 def get_prev_trading_dates(context, date_str, count):
+    date_str = _normalize_trade_date(date_str)
+    if not date_str:
+        return []
+
     try:
         dates = context.get_trading_dates("SH", "", date_str, count + 1, "1d")
         if len(dates) >= count + 1:
-            return dates[-count - 1 : -1]
+            return [_normalize_trade_date(d) for d in dates[-count - 1 : -1]]
     except Exception:
         pass
 
@@ -936,6 +979,40 @@ def _get_account_id(context):
     if ACCOUNT_ID:
         return ACCOUNT_ID
     return globals().get("account", "")
+
+
+def _normalize_trade_date(value):
+    """Normalize date-like value to YYYYMMDD."""
+    if value is None:
+        return ""
+
+    s = str(value).strip()
+    if not s:
+        return ""
+
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return ""
+
+    # epoch milliseconds
+    if len(digits) == 13:
+        try:
+            return datetime.datetime.fromtimestamp(int(digits) / 1000.0).strftime("%Y%m%d")
+        except Exception:
+            return ""
+
+    # epoch seconds
+    if len(digits) == 10:
+        try:
+            return datetime.datetime.fromtimestamp(int(digits)).strftime("%Y%m%d")
+        except Exception:
+            return ""
+
+    # datetime-like string
+    if len(digits) >= 8:
+        return digits[:8]
+
+    return ""
 
 
 def _log(msg):
