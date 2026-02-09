@@ -73,12 +73,45 @@ QUICK_TRADE = 2  # immediate order even if not last bar
 # --- QMT API adapters ---
 
 def get_universe(context):
-    """Return list of stock codes in universe."""
-    if xtdata is None:
-        raise RuntimeError("xtdata not available; cannot load A-share universe")
+    """Return list of stock codes in universe.
 
-    codes = xtdata.get_stock_list_in_sector("\u6caa\u6df1A\u80a1")
-    return [c for c in codes if is_main_board_a_share(c)]
+    Priority:
+    1) Context-provided universe (for backtest settings)
+    2) Current chart symbol
+    3) xtdata sector fallback
+    """
+    codes = []
+
+    # 1) Prefer the universe configured in QMT/backtest
+    if hasattr(context, "get_universe"):
+        try:
+            data = context.get_universe()
+            if data:
+                codes = list(data)
+        except Exception:
+            pass
+
+    # 2) Fallback to current symbol if available
+    if not codes:
+        for attr in ("stock_code", "stockcode", "stock", "symbol", "code"):
+            val = getattr(context, attr, "")
+            if val:
+                codes = [val]
+                break
+
+    # 3) Fallback to xtdata sector list
+    if not codes and xtdata is not None:
+        try:
+            codes = xtdata.get_stock_list_in_sector("\u6caa\u6df1A\u80a1")
+        except Exception:
+            codes = []
+
+    normalized = []
+    for c in codes:
+        n = normalize_stock_code(c)
+        if n and is_main_board_a_share(n):
+            normalized.append(n)
+    return normalized
 
 
 def fetch_daily_bars(context, code, end_date, count):
@@ -309,7 +342,10 @@ def init(context):
     g.account_id = _get_account_id(context)
     account_id = g.account_id
     if account_id and hasattr(context, "set_account"):
-        context.set_account(account_id)
+        try:
+            context.set_account(account_id)
+        except Exception:
+            _log("set_account failed; continue without explicit account binding")
 
     g.universe = []
     g.trade_date = None
@@ -328,10 +364,14 @@ def init(context):
     # initialize universe
     try:
         g.universe = get_universe(context)
-        if hasattr(context, "set_universe"):
+        if g.universe and hasattr(context, "set_universe"):
             context.set_universe(g.universe)
     except Exception:
         g.universe = []
+
+    _log("init done, universe size={0}".format(len(g.universe)))
+    if not g.universe:
+        _log("universe is empty; backtest may stop immediately")
 
 
 def handlebar(context):
@@ -352,6 +392,11 @@ def handlebar(context):
 
         t_date = get_trading_calendar_prev_date(context, trade_date)
         g.daily_candidates = build_daily_candidates(context, t_date)
+        _log(
+            "new day={0}, prev_day={1}, candidates={2}".format(
+                trade_date, t_date, len(g.daily_candidates)
+            )
+        )
 
     # Build watchlist at 09:35
     if (not g.watchlist_built) and now.time() >= WATCHLIST_TIME:
@@ -764,14 +809,53 @@ def is_today_down_and_volume_expand(context, code, trade_date, now):
 
 def _get_current_dt(context):
     try:
-        timetag = context.get_bar_timetag(context.barpos)
-        if timetag:
-            if "timetag_to_datetime" in globals():
-                ts = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
-                return datetime.datetime.strptime(ts, "%Y%m%d%H%M%S")
+        barpos = getattr(context, "barpos", None)
+        timetag = context.get_bar_timetag(barpos)
+        dt = _parse_timetag(timetag)
+        if dt is not None:
+            return dt
     except Exception:
         pass
     return datetime.datetime.now()
+
+
+def _parse_timetag(timetag):
+    if not timetag:
+        return None
+
+    # Prefer QMT helper if available.
+    if "timetag_to_datetime" in globals():
+        try:
+            ts = timetag_to_datetime(timetag, "%Y%m%d%H%M%S")
+            return datetime.datetime.strptime(ts, "%Y%m%d%H%M%S")
+        except Exception:
+            pass
+
+    s = str(timetag).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+
+    # Common format: YYYYMMDDHHMMSS
+    if len(digits) >= 14:
+        try:
+            return datetime.datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+        except Exception:
+            pass
+
+    # Epoch milliseconds
+    if len(digits) == 13:
+        try:
+            return datetime.datetime.fromtimestamp(int(digits) / 1000.0)
+        except Exception:
+            pass
+
+    # Epoch seconds
+    if len(digits) == 10:
+        try:
+            return datetime.datetime.fromtimestamp(int(digits))
+        except Exception:
+            pass
+
+    return None
 
 
 def is_main_board_a_share(stock_code):
@@ -799,6 +883,37 @@ def is_main_board_a_share(stock_code):
     )
 
 
+def normalize_stock_code(stock_code):
+    """Normalize symbol to 6-digit + .SH/.SZ if possible."""
+    if not stock_code:
+        return ""
+
+    s = str(stock_code).strip().upper()
+    if not s:
+        return ""
+
+    if "." in s:
+        left, right = s.split(".", 1)
+        if len(left) == 6 and right in ("SH", "SZ"):
+            return left + "." + right
+        if len(left) == 6 and right in ("XSHG", "SSE"):
+            return left + ".SH"
+        if len(left) == 6 and right in ("XSHE", "SZSE"):
+            return left + ".SZ"
+        if len(right) == 6 and left in ("SH", "SSE", "XSHG"):
+            return right + ".SH"
+        if len(right) == 6 and left in ("SZ", "SZSE", "XSHE"):
+            return right + ".SZ"
+        return s
+
+    if len(s) == 6 and s.isdigit():
+        if s.startswith(("600", "601", "603", "605", "688", "689")):
+            return s + ".SH"
+        return s + ".SZ"
+
+    return s
+
+
 def get_prev_trading_dates(context, date_str, count):
     try:
         dates = context.get_trading_dates("SH", "", date_str, count + 1, "1d")
@@ -821,3 +936,10 @@ def _get_account_id(context):
     if ACCOUNT_ID:
         return ACCOUNT_ID
     return globals().get("account", "")
+
+
+def _log(msg):
+    try:
+        print("[{0}] {1}".format(STRATEGY_NAME, msg))
+    except Exception:
+        pass
