@@ -77,7 +77,7 @@ def get_universe(context):
     if xtdata is None:
         raise RuntimeError("xtdata not available; cannot load A-share universe")
 
-    codes = xtdata.get_stock_list_in_sector("沪深A股")
+    codes = xtdata.get_stock_list_in_sector("\u6caa\u6df1A\u80a1")
     return [c for c in codes if is_main_board_a_share(c)]
 
 
@@ -364,6 +364,8 @@ def handlebar(context):
             price = get_current_price(context, code)
         except Exception:
             continue
+        if price is None:
+            continue
 
         update_intraday_low(context, code, price)
         _update_buy_day_low(context, code, trade_date)
@@ -446,6 +448,8 @@ def build_watchlist(context, trade_date, now):
 
 
 def should_buy_from_low(context, code, price):
+    if price is None:
+        return False
     low = g.intraday_low.get(code)
     if low is None:
         return False
@@ -457,6 +461,8 @@ def should_buy_from_low(context, code, price):
 
 
 def update_intraday_low(context, code, price):
+    if price is None:
+        return
     low = g.intraday_low.get(code)
     if low is None or price < low:
         g.intraday_low[code] = price
@@ -528,6 +534,8 @@ def _check_take_profit(context, now):
             price = get_current_price(context, code)
         except Exception:
             continue
+        if price is None:
+            continue
 
         cost = g.entry_price.get(code)
         if cost is None:
@@ -565,6 +573,8 @@ def _check_stop_rules(context, trade_date, now):
         try:
             price = get_current_price(context, code)
         except Exception:
+            continue
+        if price is None:
             continue
 
         buy_low = g.buy_day_low.get(code)
