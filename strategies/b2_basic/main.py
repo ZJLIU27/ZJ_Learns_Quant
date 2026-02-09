@@ -68,6 +68,12 @@ ORDER_TYPE_SELL_SHARES = 1101  # by shares
 ORDER_PRICE_TYPE = 5  # latest price
 ORDER_PRICE = 0
 QUICK_TRADE = 2  # immediate order even if not last bar
+FORCE_MAIN_BOARD_UNIVERSE = True
+MIN_UNIVERSE_SIZE = 100
+UNIVERSE_SECTOR_NAMES = (
+    "\u6caa\u6df1A\u80a1",  # HS A-share
+    "A\u80a1",              # A-share
+)
 
 
 # --- QMT API adapters ---
@@ -76,42 +82,106 @@ def get_universe(context):
     """Return list of stock codes in universe.
 
     Priority:
-    1) Context-provided universe (for backtest settings)
-    2) Current chart symbol
-    3) xtdata sector fallback
+    1) Main-board full universe from sector list (preferred)
+    2) Context-provided universe (backtest settings)
+    3) Current chart symbol
     """
-    codes = []
+    # 1) Try full A-share sector first
+    sector_codes = _get_main_board_universe_from_sector(context)
 
-    # 1) Prefer the universe configured in QMT/backtest
+    # 2) Context universe
+    ctx_codes = []
     if hasattr(context, "get_universe"):
         try:
             data = context.get_universe()
             if data:
-                codes = list(data)
+                ctx_codes = list(data)
         except Exception:
             pass
 
-    # 2) Fallback to current symbol if available
-    if not codes:
+    # 3) Current chart symbol
+    if not ctx_codes:
         for attr in ("stock_code", "stockcode", "stock", "symbol", "code"):
             val = getattr(context, attr, "")
             if val:
-                codes = [val]
+                ctx_codes = [val]
                 break
 
-    # 3) Fallback to xtdata sector list
-    if not codes and xtdata is not None:
-        try:
-            codes = xtdata.get_stock_list_in_sector("\u6caa\u6df1A\u80a1")
-        except Exception:
-            codes = []
+    sector_codes = _normalize_main_board_codes(sector_codes)
+    ctx_codes = _normalize_main_board_codes(ctx_codes)
 
+    use_sector = False
+    if sector_codes:
+        if FORCE_MAIN_BOARD_UNIVERSE:
+            use_sector = True
+        elif len(ctx_codes) < MIN_UNIVERSE_SIZE:
+            use_sector = True
+        elif len(sector_codes) > len(ctx_codes):
+            use_sector = True
+
+    if use_sector:
+        _log(
+            "universe_source=sector size={0} (ctx_size={1})".format(
+                len(sector_codes), len(ctx_codes)
+            )
+        )
+        return sector_codes
+
+    _log("universe_source=context size={0}".format(len(ctx_codes)))
+    return ctx_codes
+
+
+def _normalize_main_board_codes(codes):
     normalized = []
-    for c in codes:
+    seen = set()
+    for c in codes or []:
         n = normalize_stock_code(c)
-        if n and is_main_board_a_share(n):
-            normalized.append(n)
+        if not n or (n in seen):
+            continue
+        if not is_main_board_a_share(n):
+            continue
+        seen.add(n)
+        normalized.append(n)
     return normalized
+
+
+def _get_main_board_universe_from_sector(context):
+    """Load A-share list from sector APIs (context/global/xtdata)."""
+    all_codes = []
+
+    # context method in some QMT runtimes
+    if hasattr(context, "get_stock_list_in_sector"):
+        for name in UNIVERSE_SECTOR_NAMES:
+            try:
+                codes = context.get_stock_list_in_sector(name)
+                if codes:
+                    all_codes.extend(list(codes))
+            except Exception:
+                pass
+
+    # global helper in some QMT runtimes
+    if "get_stock_list_in_sector" in globals():
+        func = globals().get("get_stock_list_in_sector")
+        if callable(func):
+            for name in UNIVERSE_SECTOR_NAMES:
+                try:
+                    codes = func(name)
+                    if codes:
+                        all_codes.extend(list(codes))
+                except Exception:
+                    pass
+
+    # xtdata fallback
+    if xtdata is not None:
+        for name in UNIVERSE_SECTOR_NAMES:
+            try:
+                codes = xtdata.get_stock_list_in_sector(name)
+                if codes:
+                    all_codes.extend(list(codes))
+            except Exception:
+                pass
+
+    return all_codes
 
 
 def fetch_daily_bars(context, code, end_date, count):
@@ -121,18 +191,28 @@ def fetch_daily_bars(context, code, end_date, count):
     date: "YYYYMMDD"
     """
     end_date = _normalize_trade_date(end_date)
-    data = context.get_market_data_ex(
-        ["open", "high", "low", "close", "volume"],
-        [code],
-        period="1d",
-        start_time="",
-        end_time=end_date,
-        count=count,
-        dividend_type="none",
-        fill_data=True,
-        subscribe=False,
-    )
-    df = data.get(code)
+    end_candidates = [end_date, end_date + "150000", end_date + "235959", ""]
+
+    df = None
+    for end_ts in end_candidates:
+        try:
+            data = context.get_market_data_ex(
+                ["open", "high", "low", "close", "volume"],
+                [code],
+                period="1d",
+                start_time="",
+                end_time=end_ts,
+                count=count,
+                dividend_type="none",
+                fill_data=True,
+                subscribe=False,
+            )
+            cur = data.get(code)
+            if cur is not None and (not cur.empty):
+                df = cur
+                break
+        except Exception:
+            continue
     if df is None or df.empty:
         return []
 
@@ -379,6 +459,9 @@ def init(context):
         g.universe = []
 
     _log("init done, universe size={0}".format(len(g.universe)))
+    if g.universe:
+        sample = ",".join(g.universe[:5])
+        _log("universe sample={0}".format(sample))
     if not g.universe:
         _log("universe is empty; backtest may stop immediately")
 
@@ -457,6 +540,7 @@ def build_daily_candidates(context, t_date):
         "upper_shadow_fail": 0,
     }
     stats["total"] = len(g.universe)
+    short_samples = []
 
     for code in g.universe:
         if not is_main_board_a_share(code):
@@ -470,6 +554,8 @@ def build_daily_candidates(context, t_date):
 
         if len(bars) < DAILY_KDJ_N + 2:
             stats["bars_short"] += 1
+            if len(short_samples) < 3:
+                short_samples.append("{0}:{1}".format(code, len(bars)))
             continue
 
         bar_t_minus1 = bars[-2]
@@ -514,6 +600,8 @@ def build_daily_candidates(context, t_date):
             len(candidates),
         )
     )
+    if short_samples:
+        _log("bars_short_samples t_date={0} {1}".format(t_date, ",".join(short_samples)))
     return candidates
 
 
