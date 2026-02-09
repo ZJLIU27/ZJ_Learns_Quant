@@ -216,20 +216,56 @@ def fetch_daily_bars(context, code, end_date, count):
     if df is None or df.empty:
         return []
 
-    bars = []
-    for idx, row in df.iterrows():
-        date_str = str(idx)[:8]
-        bars.append(
-            {
-                "date": date_str,
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-            }
-        )
-    return bars
+    return _daily_df_to_bars(df)
+
+
+def fetch_daily_bars_batch(context, codes, end_date, count):
+    """Batch fetch daily bars for codes.
+
+    Return: dict(code -> bars list)
+    """
+    result = {}
+    if not codes:
+        return result
+
+    end_date = _normalize_trade_date(end_date)
+    if not end_date:
+        return result
+
+    end_candidates = [end_date, end_date + "150000", end_date + "235959", ""]
+    data = {}
+    for end_ts in end_candidates:
+        try:
+            data = context.get_market_data_ex(
+                ["open", "high", "low", "close", "volume"],
+                list(codes),
+                period="1d",
+                start_time="",
+                end_time=end_ts,
+                count=count,
+                dividend_type="none",
+                fill_data=True,
+                subscribe=True,
+            )
+            if data:
+                break
+        except Exception:
+            data = {}
+
+    if not data:
+        return result
+
+    for code in codes:
+        try:
+            df = data.get(code)
+            if df is None or df.empty:
+                continue
+            bars = _daily_df_to_bars(df)
+            if bars:
+                result[code] = bars
+        except Exception:
+            continue
+    return result
 
 
 def fetch_minute_bars(context, code, trade_date, end_time, count):
@@ -547,6 +583,8 @@ def build_daily_candidates(context, t_date):
     candidates = []
     stats = {
         "total": 0,
+        "batch_hit": 0,
+        "single_fallback_hit": 0,
         "bars_short": 0,
         "kdj_t1_fail": 0,
         "kdj_t_fail": 0,
@@ -556,16 +594,27 @@ def build_daily_candidates(context, t_date):
     }
     stats["total"] = len(g.universe)
     short_samples = []
+    daily_batch = {}
+    try:
+        daily_batch = fetch_daily_bars_batch(context, g.universe, t_date, DAILY_KDJ_N + 2)
+    except Exception:
+        daily_batch = {}
+    _log("daily_batch_fetch date={0} hit={1}".format(t_date, len(daily_batch)))
 
     for code in g.universe:
         if not is_main_board_a_share(code):
             continue
 
-        bars = []
-        try:
-            bars = fetch_daily_bars(context, code, t_date, DAILY_KDJ_N + 2)
-        except Exception:
-            continue
+        bars = daily_batch.get(code, [])
+        if bars:
+            stats["batch_hit"] += 1
+        else:
+            try:
+                bars = fetch_daily_bars(context, code, t_date, DAILY_KDJ_N + 2)
+            except Exception:
+                bars = []
+            if bars:
+                stats["single_fallback_hit"] += 1
 
         if len(bars) < DAILY_KDJ_N + 2:
             stats["bars_short"] += 1
@@ -603,9 +652,11 @@ def build_daily_candidates(context, t_date):
         candidates.append(code)
 
     _log(
-        "daily_filter_stats total={0} bars_short={1} kdj_t1_fail={2} "
-        "kdj_t_fail={3} ret_fail={4} vol_fail={5} upper_shadow_fail={6} pass={7}".format(
+        "daily_filter_stats total={0} batch_hit={1} fallback_hit={2} bars_short={3} "
+        "kdj_t1_fail={4} kdj_t_fail={5} ret_fail={6} vol_fail={7} upper_shadow_fail={8} pass={9}".format(
             stats["total"],
+            stats["batch_hit"],
+            stats["single_fallback_hit"],
             stats["bars_short"],
             stats["kdj_t1_fail"],
             stats["kdj_t_fail"],
@@ -1133,6 +1184,37 @@ def _get_account_id(context):
     if ACCOUNT_ID:
         return ACCOUNT_ID
     return globals().get("account", "")
+
+
+def _daily_df_to_bars(df):
+    bars = []
+    try:
+        iterator = df.iterrows()
+    except Exception:
+        return bars
+
+    for idx, row in iterator:
+        date_str = str(idx)
+        digits = "".join(ch for ch in date_str if ch.isdigit())
+        if len(digits) >= 8:
+            date_str = digits[:8]
+        else:
+            date_str = ""
+
+        try:
+            bars.append(
+                {
+                    "date": date_str,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
+            )
+        except Exception:
+            continue
+    return bars
 
 
 def _log_end_of_day_entry_stats(trade_date):
