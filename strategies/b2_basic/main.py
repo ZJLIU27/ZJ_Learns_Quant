@@ -41,6 +41,8 @@ DAILY_RETURN_MIN = 0.04
 UPPER_SHADOW_MAX_RATIO = 0.20
 
 VOLUME_RATIO_MIN = 20.0
+VOLUME_RATIO_WINDOW_START = datetime.time(9, 0)
+VOLUME_RATIO_WINDOW_END = datetime.time(9, 35)
 WATCHLIST_SIZE = 3
 WATCHLIST_TIME = datetime.time(9, 35)
 
@@ -679,6 +681,12 @@ def build_watchlist(context, trade_date, now):
         "vol_ratio_low": 0,
         "downtrend_fail": 0,
     }
+    _log(
+        "volume_ratio_window={0}-{1}".format(
+            VOLUME_RATIO_WINDOW_START.strftime("%H:%M"),
+            VOLUME_RATIO_WINDOW_END.strftime("%H:%M"),
+        )
+    )
     for code in g.daily_candidates:
         vol_ratio = calc_volume_ratio(context, code, trade_date, now)
         if vol_ratio is None:
@@ -955,20 +963,23 @@ def compute_kdj(bars, n, k_init, d_init):
 
 
 def calc_volume_ratio(context, code, trade_date, now):
-    """Calculate volume ratio at time now.
+    """Calculate volume ratio for fixed window 09:00-09:35.
 
-    Definition: current cumulative volume / average cumulative volume at
-    the same time over the past 5 trading days.
+    Definition: today's cumulative volume in [09:00, 09:35] divided by
+    average cumulative volume in the same window over the past 5 trading days.
     """
+    window_start = VOLUME_RATIO_WINDOW_START.strftime("%H:%M")
+    window_end = VOLUME_RATIO_WINDOW_END.strftime("%H:%M")
+
     try:
-        bars = fetch_minute_bars(context, code, trade_date, now.strftime("%H:%M"), 240)
+        bars = fetch_minute_bars(context, code, trade_date, window_end, 300)
     except Exception:
         return None
 
     if not bars:
         return None
 
-    today_cum = sum(b["volume"] for b in bars)
+    today_cum = _sum_window_volume(bars, window_start, window_end)
     if today_cum <= 0:
         return None
 
@@ -979,12 +990,14 @@ def calc_volume_ratio(context, code, trade_date, now):
     cum_list = []
     for d in prev_dates:
         try:
-            d_bars = fetch_minute_bars(context, code, d, now.strftime("%H:%M"), 240)
+            d_bars = fetch_minute_bars(context, code, d, window_end, 300)
         except Exception:
             continue
         if not d_bars:
             continue
-        cum_list.append(sum(b["volume"] for b in d_bars))
+        d_cum = _sum_window_volume(d_bars, window_start, window_end)
+        if d_cum > 0:
+            cum_list.append(d_cum)
 
     if len(cum_list) < 5:
         return None
@@ -1184,6 +1197,18 @@ def _get_account_id(context):
     if ACCOUNT_ID:
         return ACCOUNT_ID
     return globals().get("account", "")
+
+
+def _sum_window_volume(bars, start_hhmm, end_hhmm):
+    total = 0.0
+    for b in bars:
+        t = b.get("time", "")
+        if t and start_hhmm <= t <= end_hhmm:
+            try:
+                total += float(b.get("volume", 0.0))
+            except Exception:
+                continue
+    return total
 
 
 def _daily_df_to_bars(df):
