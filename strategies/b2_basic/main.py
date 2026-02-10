@@ -974,39 +974,56 @@ def calc_volume_ratio(context, code, trade_date, now):
     try:
         bars = fetch_minute_bars(context, code, trade_date, window_end, 300)
     except Exception:
+        _log("vol_ratio_debug code={0} date={1} ERROR fetching today bars".format(code, trade_date))
         return None
 
     if not bars:
+        _log("vol_ratio_debug code={0} date={1} today_bars=EMPTY".format(code, trade_date))
         return None
 
     today_cum = _sum_window_volume(bars, window_start, window_end)
     if today_cum <= 0:
+        _log("vol_ratio_debug code={0} date={1} today_cum=0 (bars_count={2} window={3}-{4})".format(
+            code, trade_date, len(bars), window_start, window_end))
         return None
 
     prev_dates = get_prev_trading_dates(context, trade_date, 5)
     if len(prev_dates) < 5:
+        _log("vol_ratio_debug code={0} date={1} prev_dates_count={2} (need 5)".format(
+            code, trade_date, len(prev_dates)))
         return None
 
     cum_list = []
+    cum_detail = []
     for d in prev_dates:
         try:
             d_bars = fetch_minute_bars(context, code, d, window_end, 300)
         except Exception:
+            cum_detail.append("{0}=ERR".format(d))
             continue
         if not d_bars:
+            cum_detail.append("{0}=EMPTY".format(d))
             continue
         d_cum = _sum_window_volume(d_bars, window_start, window_end)
+        cum_detail.append("{0}={1:.0f}".format(d, d_cum))
         if d_cum > 0:
             cum_list.append(d_cum)
 
     if len(cum_list) < 5:
+        _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} hist_valid={3}/5 hist=[{4}]".format(
+            code, trade_date, today_cum, len(cum_list), ",".join(cum_detail)))
         return None
 
     avg_prev = sum(cum_list) / 5.0
     if avg_prev <= 0:
+        _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} avg_prev=0".format(
+            code, trade_date, today_cum))
         return None
 
-    return today_cum / avg_prev
+    ratio = today_cum / avg_prev
+    _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} avg_prev={3:.0f} ratio={4:.2f} hist=[{5}]".format(
+        code, trade_date, today_cum, avg_prev, ratio, ",".join(cum_detail)))
+    return ratio
 
 
 def is_downtrend(context, code, trade_date, now):
