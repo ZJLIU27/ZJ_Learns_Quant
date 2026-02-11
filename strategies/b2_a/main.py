@@ -32,6 +32,7 @@ class G:
 g = G()
 
 STRATEGY_NAME = "b2_a"
+STRATEGY_REV = "2026-02-11-daily-pattern-no-vr-threshold"
 
 # --- Config (confirm/adjust with final rules) ---
 DAILY_KDJ_N = 9
@@ -597,6 +598,7 @@ def init(context):
         g.universe = []
 
     _log("init done, universe size={0}".format(len(g.universe)))
+    _log("revision={0}".format(STRATEGY_REV))
     if g.universe:
         sample = ",".join(g.universe[:5])
         _log("universe sample={0}".format(sample))
