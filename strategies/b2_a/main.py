@@ -73,7 +73,7 @@ PULLBACK_MAX_BAR_VOL_RATIO = 1.00
 SECOND_CANNON_MIN_FIRST_VOL_RATIO = 0.80
 SECOND_CANNON_VOL_MA_MULT = 1.00
 REBOUND_LOOKBACK = 5
-REBOUND_LOCAL_LOW_TICKS = 1.0
+REBOUND_LOCAL_LOW_TICKS = 3.0
 
 ORDER_CASH = 20000.0
 ENABLE_TRADING = True  # exit rules defined, ready for trading (adapters required)
@@ -936,8 +936,7 @@ def _is_second_cannon_bar(bars, idx, state):
     if idx <= 1:
         return False
     pullback_low = state.get("pullback_low")
-    pullback_high = state.get("pullback_high")
-    if pullback_low is None or pullback_high is None:
+    if pullback_low is None:
         return False
     if not state.get("pullback_has_shrink", False):
         return False
@@ -953,10 +952,8 @@ def _is_second_cannon_bar(bars, idx, state):
     avg_line = _intraday_avg_price_line(bars, idx)
     if avg_line is None:
         return False
-    # Entry timing: still below intraday average-price line and intraday line starts rebounding.
+    # Entry timing: below intraday average-price line and intraday line starts rebounding.
     if close >= avg_line:
-        return False
-    if prev_close >= avg_line:
         return False
     # Rebound inflection on intraday line: down then up.
     if prev_close >= (prev2_close - TICK_SIZE):
