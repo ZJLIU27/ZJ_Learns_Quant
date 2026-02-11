@@ -10,7 +10,7 @@ Rules (current):
   3) T daily return > 4%
   4) T volume >= 1.5 * T-1 volume
   5) T upper shadow < 20% of full candle range
-- At T+1 09:35: from candidates, pick top 3 by volume ratio (>20) in a downtrend.
+- At T+1 09:35: from candidates, pick top 3 by volume ratio (>5).
 - Entry: buy when price rises >= 3 ticks from the intraday low.
 """
 
@@ -707,7 +707,6 @@ def build_watchlist(context, trade_date, now):
         "total_candidates": len(g.daily_candidates),
         "vol_ratio_none": 0,
         "vol_ratio_low": 0,
-        "downtrend_fail": 0,
     }
     _log(
         "volume_ratio_window={0}-{1}".format(
@@ -723,20 +722,16 @@ def build_watchlist(context, trade_date, now):
         if vol_ratio <= VOLUME_RATIO_MIN:
             stats["vol_ratio_low"] += 1
             continue
-        if not is_downtrend(context, code, trade_date, now):
-            stats["downtrend_fail"] += 1
-            continue
         ranked.append((code, vol_ratio))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
     _log(
         "watchlist_stats total_candidates={0} vol_ratio_none={1} vol_ratio_low={2} "
-        "downtrend_fail={3} passed={4} selected={5}".format(
+        "passed={3} selected={4}".format(
             stats["total_candidates"],
             stats["vol_ratio_none"],
             stats["vol_ratio_low"],
-            stats["downtrend_fail"],
             len(ranked),
             len(watchlist),
         )

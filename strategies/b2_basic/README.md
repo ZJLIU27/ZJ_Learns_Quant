@@ -15,7 +15,7 @@ Daily filters on T and T-1:
 5. T upper shadow < 20% of full candle range
 
 Intraday at T+1 09:35:
-6. From candidates, pick top 3 by volume ratio (>20) and in a downtrend.
+6. From candidates, pick top 3 by volume ratio (>5).
    - Volume ratio = current cumulative volume / avg cumulative volume
      at the same time over past 5 trading days.
 7. Buy when price rises >= 3 ticks from intraday low.
