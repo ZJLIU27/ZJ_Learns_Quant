@@ -635,13 +635,27 @@ def handlebar(context):
             )
         )
 
-    # Build watchlist at 09:35 using volume-ratio top3.
-    if (not g.watchlist_built) and now.time() >= WATCHLIST_TIME:
+    # Build watchlist at 09:35; fallback for coarse-bar backtests (non-intraday timestamps).
+    build_watchlist_due = now.time() >= WATCHLIST_TIME
+    fallback_reason = ""
+    if (not build_watchlist_due) and (not _is_continuous_auction_time(now.strftime("%H:%M"))):
+        build_watchlist_due = True
+        fallback_reason = "non_intraday_bar_time"
+
+    if (not g.watchlist_built) and build_watchlist_due:
+        if fallback_reason:
+            _log(
+                "watchlist_build_fallback reason={0} bar_time={1}".format(
+                    fallback_reason, now.strftime("%H:%M:%S")
+                )
+            )
         g.watchlist = build_watchlist(context, trade_date, now)
         g.watchlist_built = True
         _log("watchlist built size={0}".format(len(g.watchlist)))
         if g.watchlist:
             _log("watchlist sample={0}".format(",".join(g.watchlist[:5])))
+
+    entry_due = (now.time() >= WATCHLIST_TIME) or bool(fallback_reason)
 
     # At/after 09:35, place entry for selected top3 once; failed orders retry next minute.
     for code in g.watchlist:
@@ -660,11 +674,7 @@ def handlebar(context):
             st = {"checks": 0, "hits": 0}
             g.entry_check_stats[code] = st
 
-        if (
-            now.time() >= WATCHLIST_TIME
-            and code not in g.entry_submitted
-            and code not in g.pending_buy
-        ):
+        if entry_due and code not in g.entry_submitted and code not in g.pending_buy:
             st["checks"] += 1
             st["hits"] += 1
             g.entry_submitted.add(code)
