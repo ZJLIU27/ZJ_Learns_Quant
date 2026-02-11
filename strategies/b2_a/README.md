@@ -15,13 +15,13 @@ Daily filters on T and T-1:
 5. T upper shadow < 20% of full candle range
 
 Intraday at T+1:
-6. Graphic-pattern filter is applied in selection layer (on T-day 1m bars):
+6. Graphic-pattern filter is applied in selection layer (on T-day daily bars):
    - Parallel zone: MA5/MA10 close and flat.
    - First cannon: breakout bullish bar with strong volume.
    - Pullback: 1-4 bars, no deep retrace / no MA10 break, and shrink-volume signal.
-   - Second-cannon rebound: still below intraday avg-price line, inflection up.
+   - Second-cannon rebound: rebound inflection up (`prev2_close > prev_close < current_close`).
 7. At 09:35, compute volume ratio for candidates that passed graphic filter.
-8. Select top 3 by volume ratio (and ratio must be > 5), then place buy orders at 09:35.
+8. Select top 3 by volume ratio, then place buy orders at 09:35.
    - If a 1-minute order fails, retry on next minute with latest price.
 
 Exit rules:

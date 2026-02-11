@@ -10,9 +10,9 @@ Rules (current):
   3) T daily return > 4%
   4) T volume >= 1.5 * T-1 volume
   5) T upper shadow < 20% of full candle range
-- Graphic features are fully applied in selection layer on T-day 1m bars:
+- Graphic features are fully applied in selection layer on T-day daily bars:
   parallel -> first cannon -> pullback -> second-cannon rebound.
-- At T+1 09:35: from passed candidates, pick top 3 by volume ratio (>5).
+- At T+1 09:35: from passed candidates, pick top 3 by volume ratio.
 - Entry: buy selected top3 at 09:35; failed orders retry next minute.
 """
 
@@ -43,7 +43,6 @@ DAILY_RETURN_MIN = 0.04
 DAILY_VOLUME_RATIO_MIN = 1.5
 UPPER_SHADOW_MAX_RATIO = 0.20
 
-VOLUME_RATIO_MIN = 5.0
 VOLUME_RATIO_WINDOW_START = datetime.time(9, 30)
 VOLUME_RATIO_WINDOW_END = datetime.time(9, 35)
 TRADING_MINUTES_PER_DAY = 240.0
@@ -789,7 +788,6 @@ def build_watchlist(context, trade_date, now):
     stats = {
         "total_candidates": len(g.daily_candidates),
         "vol_ratio_none": 0,
-        "vol_ratio_low": 0,
         "pattern_fail": 0,
     }
     pattern_date = get_trading_calendar_prev_date(context, trade_date)
@@ -819,9 +817,6 @@ def build_watchlist(context, trade_date, now):
         if vol_ratio is None:
             stats["vol_ratio_none"] += 1
             continue
-        if vol_ratio <= VOLUME_RATIO_MIN:
-            stats["vol_ratio_low"] += 1
-            continue
         if not _match_graphic_pattern_on_date(context, code, pattern_date):
             stats["pattern_fail"] += 1
             continue
@@ -830,11 +825,10 @@ def build_watchlist(context, trade_date, now):
     ranked.sort(key=lambda x: x[1], reverse=True)
     watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
     _log(
-        "watchlist_stats total_candidates={0} vol_ratio_none={1} vol_ratio_low={2} "
-        "pattern_fail={3} passed={4} selected={5}".format(
+        "watchlist_stats total_candidates={0} vol_ratio_none={1} "
+        "pattern_fail={2} passed={3} selected={4}".format(
             stats["total_candidates"],
             stats["vol_ratio_none"],
-            stats["vol_ratio_low"],
             stats["pattern_fail"],
             len(ranked),
             len(watchlist),
@@ -932,9 +926,9 @@ def _process_b2_a_entry(context, code, trade_date, now, price):
 
 
 def _match_graphic_pattern_on_date(context, code, trade_date):
-    """Return True if full b2_a graphic pattern appears on a given trade date."""
+    """Return True if full b2_a graphic pattern appears on daily bars up to trade_date."""
     try:
-        bars = fetch_minute_bars(context, code, trade_date, "15:00", 600)
+        bars = fetch_daily_bars(context, code, trade_date, 120)
     except Exception:
         return False
     if not bars:
@@ -948,9 +942,7 @@ def _match_graphic_pattern_on_bars(bars):
     _reset_entry_pattern_state(state, "")
 
     for idx, bar in enumerate(bars):
-        hhmm = bar.get("time", "")
-        if not hhmm:
-            continue
+        marker = bar.get("time", "") or bar.get("date", "") or str(idx)
 
         if state.get("stage") == "wait_first":
             ok, zone_high = _is_first_cannon_bar(bars, idx)
@@ -966,28 +958,28 @@ def _match_graphic_pattern_on_bars(bars):
                 state["pullback_low"] = None
                 state["pullback_high"] = None
                 state["pullback_has_shrink"] = False
-            state["last_bar_time"] = hhmm
+            state["last_bar_time"] = marker
             continue
 
         gap = idx - int(state.get("first_idx", -1))
         if gap <= 0:
-            state["last_bar_time"] = hhmm
+            state["last_bar_time"] = marker
             continue
 
         ma10 = _ma_on_close(bars, idx, 10)
         if ma10 is not None and ma10 > 0:
             if float(bar["low"]) < ma10 * (1.0 - PULLBACK_MA10_TOLERANCE):
-                _reset_entry_pattern_state(state, hhmm)
+                _reset_entry_pattern_state(state, marker)
                 continue
 
         first_body = max(float(state.get("first_close", 0.0)) - float(state.get("first_open", 0.0)), TICK_SIZE)
         max_retrace_low = float(state.get("first_close", 0.0)) - first_body * PULLBACK_MAX_RETRACE_FIRST_BODY
         if float(bar["low"]) < max_retrace_low:
-            _reset_entry_pattern_state(state, hhmm)
+            _reset_entry_pattern_state(state, marker)
             continue
 
         if gap > (PULLBACK_MAX_BARS + 1):
-            _reset_entry_pattern_state(state, hhmm)
+            _reset_entry_pattern_state(state, marker)
             continue
 
         min_gap_for_second = PULLBACK_MIN_BARS + 1
@@ -1006,7 +998,7 @@ def _match_graphic_pattern_on_bars(bars):
             if first_volume > 0 and float(bar["volume"]) <= first_volume * PULLBACK_MAX_BAR_VOL_RATIO:
                 state["pullback_has_shrink"] = True
 
-        state["last_bar_time"] = hhmm
+        state["last_bar_time"] = marker
 
     return False
 
@@ -1082,15 +1074,7 @@ def _is_second_cannon_bar(bars, idx, state):
     close = float(bar["close"])
     prev2_close = float(bars[idx - 2]["close"])
     prev_close = float(bars[idx - 1]["close"])
-    avg_line = _intraday_avg_price_line(bars, idx)
-    if avg_line is None:
-        return False
-    # Entry timing: still below intraday average-price line and intraday line starts rebounding.
-    if close >= avg_line:
-        return False
-    if prev_close >= avg_line:
-        return False
-    # Rebound inflection on intraday line: down then up.
+    # Rebound inflection: down then up.
     if prev_close >= (prev2_close - TICK_SIZE):
         return False
     if close <= (prev_close + TICK_SIZE):
@@ -1183,23 +1167,6 @@ def _ma_on_volume(bars, end_idx, period):
     for i in range(start_idx, end_idx + 1):
         total += float(bars[i]["volume"])
     return total / float(period)
-
-
-def _intraday_avg_price_line(bars, end_idx):
-    if end_idx < 0:
-        return None
-    amount_sum = 0.0
-    volume_sum = 0.0
-    for i in range(0, end_idx + 1):
-        volume = float(bars[i]["volume"])
-        if volume <= 0:
-            continue
-        price = float(bars[i]["close"])
-        amount_sum += price * volume
-        volume_sum += volume
-    if volume_sum <= 0:
-        return None
-    return amount_sum / volume_sum
 
 
 def _try_place_buy(context, code, price, now, stop_low=None):
