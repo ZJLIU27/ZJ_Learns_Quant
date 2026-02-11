@@ -280,31 +280,55 @@ def fetch_minute_bars(context, code, trade_date, end_time, count):
     if not trade_date:
         return []
 
-    end_ts = trade_date + end_time.replace(":", "") + "00"
-    data = context.get_market_data_ex(
-        ["open", "high", "low", "close", "volume"],
-        [code],
-        period="1m",
-        start_time="",
-        end_time=end_ts,
-        count=count,
-        dividend_type="none",
-        fill_data=True,
-        subscribe=True,
-    )
-    df = data.get(code)
+    end_hhmm = "".join(ch for ch in str(end_time) if ch.isdigit())[:4]
+    if len(end_hhmm) != 4:
+        end_hhmm = "1500"
+    end_ts = trade_date + end_hhmm + "00"
+    start_ts_day = trade_date + "090000"
+
+    # Historical minute bars in backtest are more stable with subscribe=False
+    # and explicit same-day start/end range.
+    query_plan = [
+        {"start_time": start_ts_day, "end_time": end_ts, "subscribe": False, "count": max(count, 480)},
+        {"start_time": start_ts_day, "end_time": end_ts, "subscribe": True, "count": max(count, 480)},
+        {"start_time": "", "end_time": end_ts, "subscribe": False, "count": count},
+        {"start_time": "", "end_time": end_ts, "subscribe": True, "count": count},
+    ]
+
+    df = None
+    for q in query_plan:
+        try:
+            data = context.get_market_data_ex(
+                ["open", "high", "low", "close", "volume"],
+                [code],
+                period="1m",
+                start_time=q["start_time"],
+                end_time=q["end_time"],
+                count=q["count"],
+                dividend_type="none",
+                fill_data=True,
+                subscribe=q["subscribe"],
+            )
+            cur = data.get(code)
+            if cur is not None and (not cur.empty):
+                df = cur
+                break
+        except Exception:
+            continue
+
     if df is None or df.empty:
         return []
 
     bars = []
     for idx, row in df.iterrows():
-        idx_str = str(idx)
-        if not idx_str.startswith(trade_date):
+        d, hhmm = _extract_yyyymmdd_hhmm(idx)
+        if d != trade_date or (hhmm and hhmm > end_hhmm):
             continue
-        time_str = idx_str[8:12]
+        if not hhmm:
+            continue
         bars.append(
             {
-                "time": time_str[:2] + ":" + time_str[2:],
+                "time": hhmm[:2] + ":" + hhmm[2:],
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),
@@ -1226,6 +1250,17 @@ def _sum_window_volume(bars, start_hhmm, end_hhmm):
             except Exception:
                 continue
     return total
+
+
+def _extract_yyyymmdd_hhmm(index_value):
+    """Parse various QMT/pandas index formats to (YYYYMMDD, HHMM)."""
+    s = str(index_value).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 12:
+        return digits[:8], digits[8:12]
+    if len(digits) >= 8:
+        return digits[:8], ""
+    return "", ""
 
 
 def _daily_df_to_bars(df):
