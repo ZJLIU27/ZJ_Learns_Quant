@@ -21,6 +21,8 @@ Intraday at T+1:
    - Pullback: 1-4 bars, no deep retrace / no MA10 break, and shrink-volume signal.
    - Second-cannon rebound: rebound inflection up (`prev2_close > prev_close < current_close`).
 7. At 09:35, compute volume ratio for candidates that passed graphic filter.
+   - If minute data is unavailable in current backtest mode, fallback ratio is used:
+     `volume(T) / avg volume(T-1..T-5)`.
 8. Select top 3 by volume ratio, then place buy orders at 09:35.
    - If a 1-minute order fails, retry on next minute with latest price.
 

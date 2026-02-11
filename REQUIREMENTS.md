@@ -21,6 +21,9 @@
 - 默认根目录：`/Users/liuzijian/git/ZJ_Learns_Quant/strategies/<strategy_name>/`。
 - 最少包含：`main.py` 与 `README.md`。
 
+## 账户约定
+- 策略默认 `account_id` 固定为 `testS`（即 `ACCOUNT_ID = "testS"`）。
+
 ## 策略细节声明
 - 具体规则、参数、风控由单独策略说明给出。
 

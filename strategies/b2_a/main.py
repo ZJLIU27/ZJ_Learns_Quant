@@ -85,7 +85,7 @@ TAKE_PROFIT_2 = 0.10
 TAKE_PROFIT_SELL_RATIO = 1.0 / 3.0
 STOP_CHECK_TIME = datetime.time(14, 45)
 
-ACCOUNT_ID = ""  # leave empty to use built-in `account` from QMT
+ACCOUNT_ID = "testS"
 ACCOUNT_TYPE = "stock"
 
 BUY_OP = 23
@@ -800,6 +800,7 @@ def build_watchlist(context, trade_date, now):
     stats = {
         "total_candidates": len(g.daily_candidates),
         "vol_ratio_none": 0,
+        "vol_ratio_fallback": 0,
         "pattern_fail": 0,
     }
     pattern_date = get_trading_calendar_prev_date(context, trade_date)
@@ -813,6 +814,10 @@ def build_watchlist(context, trade_date, now):
         )
     )
     for code in g.daily_candidates:
+        if not _match_graphic_pattern_on_date(context, code, pattern_date):
+            stats["pattern_fail"] += 1
+            continue
+
         decided, vol_ratio = _calc_volume_ratio_prefetched(
             code=code,
             prev_dates=prev_dates,
@@ -826,21 +831,25 @@ def build_watchlist(context, trade_date, now):
         )
         if not decided:
             vol_ratio = calc_volume_ratio(context, code, trade_date, now)
+
         if vol_ratio is None:
-            stats["vol_ratio_none"] += 1
-            continue
-        if not _match_graphic_pattern_on_date(context, code, pattern_date):
-            stats["pattern_fail"] += 1
-            continue
+            fallback_ratio = _daily_volume_ratio_fallback(context, code, pattern_date)
+            if fallback_ratio is None:
+                stats["vol_ratio_none"] += 1
+                continue
+            vol_ratio = fallback_ratio
+            stats["vol_ratio_fallback"] += 1
+
         ranked.append((code, vol_ratio))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
     _log(
         "watchlist_stats total_candidates={0} vol_ratio_none={1} "
-        "pattern_fail={2} passed={3} selected={4}".format(
+        "vol_ratio_fallback={2} pattern_fail={3} passed={4} selected={5}".format(
             stats["total_candidates"],
             stats["vol_ratio_none"],
+            stats["vol_ratio_fallback"],
             stats["pattern_fail"],
             len(ranked),
             len(watchlist),
@@ -850,6 +859,27 @@ def build_watchlist(context, trade_date, now):
         top = ",".join(["{0}:{1:.2f}".format(c, v) for c, v in ranked[:5]])
         _log("watchlist_rank_top={0}".format(top))
     return watchlist
+
+
+def _daily_volume_ratio_fallback(context, code, end_date):
+    """Fallback ranking ratio when minute data is unavailable.
+
+    ratio = volume(T) / avg volume(T-1 ... T-5)
+    """
+    try:
+        bars = fetch_daily_bars(context, code, end_date, 6)
+    except Exception:
+        return None
+    if len(bars) < 6:
+        return None
+
+    t_vol = float(bars[-1].get("volume", 0.0))
+    if t_vol <= 0:
+        return None
+    avg5 = sum(float(b.get("volume", 0.0)) for b in bars[-6:-1]) / 5.0
+    if avg5 <= 0:
+        return None
+    return t_vol / avg5
 
 
 def _process_b2_a_entry(context, code, trade_date, now, price):
