@@ -11,7 +11,7 @@ Daily filters on T and T-1:
 1. J(T-1) < 20 (KDJ)
 2. J(T) < 65 (KDJ)
 3. T daily return > 4%
-4. T volume > T-1 volume
+4. T volume >= 1.5 * T-1 volume
 5. T upper shadow < 20% of full candle range
 
 Intraday at T+1 09:35:

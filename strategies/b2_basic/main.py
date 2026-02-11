@@ -8,7 +8,7 @@ Rules (current):
   1) J(T-1) < 20 (KDJ)
   2) J(T) < 65 (KDJ)
   3) T daily return > 4%
-  4) T volume > T-1 volume
+  4) T volume >= 1.5 * T-1 volume
   5) T upper shadow < 20% of full candle range
 - At T+1 09:35: from candidates, pick top 3 by volume ratio (>20) in a downtrend.
 - Entry: buy when price rises >= 3 ticks from the intraday low.
@@ -38,6 +38,7 @@ KDJ_INIT = 50.0
 J_T_MINUS1_MAX = 20.0
 J_T_MAX = 65.0
 DAILY_RETURN_MIN = 0.04
+DAILY_VOLUME_RATIO_MIN = 1.5
 UPPER_SHADOW_MAX_RATIO = 0.20
 
 VOLUME_RATIO_MIN = 5.0
@@ -670,7 +671,8 @@ def build_daily_candidates(context, t_date):
         if not daily_return_ok(bar_t_minus1, bar_t):
             stats["ret_fail"] += 1
             continue
-        if bar_t["volume"] <= bar_t_minus1["volume"]:
+        prev_vol = bar_t_minus1["volume"]
+        if prev_vol <= 0 or bar_t["volume"] < (prev_vol * DAILY_VOLUME_RATIO_MIN):
             stats["vol_fail"] += 1
             continue
         if upper_shadow_ratio(bar_t) >= UPPER_SHADOW_MAX_RATIO:
