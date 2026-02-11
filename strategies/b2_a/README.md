@@ -3,8 +3,8 @@
 ## Summary
 - Universe: China A-share main board only (exclude ChiNext and STAR).
 - Selection: daily bars (T is the last completed trading day).
-- Execution: minute bars, build watchlist at 09:35.
-- Entry model: at 09:35 buy the top 3 candidates by volume ratio, after full graphic-pattern filter.
+- Execution: day-bar compatible; build watchlist each trading day (09:35 or fallback in coarse bars).
+- Entry model: buy top 3 candidates after full daily graphic-pattern filter and daily volume-ratio ranking.
 
 ## Rules
 Daily filters on T and T-1:
@@ -18,12 +18,13 @@ Intraday at T+1:
 6. Graphic-pattern filter is applied in selection layer (on T-day daily bars):
    - Parallel zone: MA5/MA10 close and flat.
    - First cannon: breakout bullish bar with strong volume.
-   - Pullback: 1-4 bars, no deep retrace / no MA10 break, and shrink-volume signal.
+   - Pullback: 1-6 bars, only require close not below Zhixing long/short line
+     (`(MA14+MA28+MA57+MA114)/4`), while still recording pullback range and shrink-volume signal.
    - Second-cannon rebound: rebound inflection up (`prev2_close > prev_close < current_close`).
-7. At 09:35, compute volume ratio for candidates that passed graphic filter.
-   - If minute data is unavailable in current backtest mode, fallback ratio is used:
-     `volume(T) / avg volume(T-1..T-5)`.
-8. Select top 3 by volume ratio, then place buy orders at 09:35.
+7. Rank candidates by daily volume ratio:
+   - `volume(T) / avg volume(T-1..T-5)`.
+8. Select top 3 by this ranking, then place buy orders at 09:35.
+   - In non-intraday bar backtests, strategy uses fallback trigger on first bar of day.
    - If a 1-minute order fails, retry on next minute with latest price.
 
 Exit rules:

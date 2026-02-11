@@ -32,7 +32,7 @@ class G:
 g = G()
 
 STRATEGY_NAME = "b2_a"
-STRATEGY_REV = "2026-02-11-daily-pattern-no-vr-threshold"
+STRATEGY_REV = "2026-02-11-daily-pattern-zhixing-pullback6"
 
 # --- Config (confirm/adjust with final rules) ---
 DAILY_KDJ_N = 9
@@ -67,10 +67,15 @@ FIRST_CANNON_BODY_MIN_RATIO = 0.60
 FIRST_CANNON_VOL_MA_MULT = 1.80
 
 PULLBACK_MIN_BARS = 1
-PULLBACK_MAX_BARS = 4
-PULLBACK_MA10_TOLERANCE = 0.003
-PULLBACK_MAX_RETRACE_FIRST_BODY = 0.50
+PULLBACK_MAX_BARS = 6
 PULLBACK_MAX_BAR_VOL_RATIO = 1.00
+
+# Zhixing line params from REQUIREMENTS.md:
+# zhixing_duokong = (MA(C,14)+MA(C,28)+MA(C,57)+MA(C,114))/4
+ZHIXING_M1 = 14
+ZHIXING_M2 = 28
+ZHIXING_M3 = 57
+ZHIXING_M4 = 114
 
 SECOND_CANNON_MIN_FIRST_VOL_RATIO = 0.80
 SECOND_CANNON_VOL_MA_MULT = 1.00
@@ -799,57 +804,30 @@ def build_watchlist(context, trade_date, now):
     ranked = []
     stats = {
         "total_candidates": len(g.daily_candidates),
-        "vol_ratio_none": 0,
-        "vol_ratio_fallback": 0,
+        "daily_rank_none": 0,
         "pattern_fail": 0,
     }
     pattern_date = get_trading_calendar_prev_date(context, trade_date)
-    prev_dates = get_prev_trading_dates(context, trade_date, 5)
-    prefetch = _prefetch_volume_ratio_data(context, g.daily_candidates, trade_date, now, prev_dates)
     _log("graphic_pattern_date={0}".format(pattern_date))
-    _log(
-        "volume_ratio_window={0}-{1}".format(
-            VOLUME_RATIO_WINDOW_START.strftime("%H:%M"),
-            VOLUME_RATIO_WINDOW_END.strftime("%H:%M"),
-        )
-    )
+    _log("ranking_metric=daily_volume_ratio(T/avg5)")
     for code in g.daily_candidates:
         if not _match_graphic_pattern_on_date(context, code, pattern_date):
             stats["pattern_fail"] += 1
             continue
 
-        decided, vol_ratio = _calc_volume_ratio_prefetched(
-            code=code,
-            prev_dates=prev_dates,
-            elapsed_minutes=prefetch.get("elapsed_minutes", 0.0),
-            window_start=prefetch.get("window_start", ""),
-            window_end=prefetch.get("window_end", ""),
-            today_bars_by_code=prefetch.get("today_bars_by_code", {}),
-            hist_bars_by_date=prefetch.get("hist_bars_by_date", {}),
-            today_prefetch_ok=prefetch.get("today_prefetch_ok", False),
-            hist_prefetch_ok_by_date=prefetch.get("hist_prefetch_ok_by_date", {}),
-        )
-        if not decided:
-            vol_ratio = calc_volume_ratio(context, code, trade_date, now)
-
-        if vol_ratio is None:
-            fallback_ratio = _daily_volume_ratio_fallback(context, code, pattern_date)
-            if fallback_ratio is None:
-                stats["vol_ratio_none"] += 1
-                continue
-            vol_ratio = fallback_ratio
-            stats["vol_ratio_fallback"] += 1
-
-        ranked.append((code, vol_ratio))
+        rank_score = _daily_volume_ratio_score(context, code, pattern_date)
+        if rank_score is None:
+            stats["daily_rank_none"] += 1
+            continue
+        ranked.append((code, rank_score))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
     _log(
-        "watchlist_stats total_candidates={0} vol_ratio_none={1} "
-        "vol_ratio_fallback={2} pattern_fail={3} passed={4} selected={5}".format(
+        "watchlist_stats total_candidates={0} daily_rank_none={1} "
+        "pattern_fail={2} passed={3} selected={4}".format(
             stats["total_candidates"],
-            stats["vol_ratio_none"],
-            stats["vol_ratio_fallback"],
+            stats["daily_rank_none"],
             stats["pattern_fail"],
             len(ranked),
             len(watchlist),
@@ -861,8 +839,8 @@ def build_watchlist(context, trade_date, now):
     return watchlist
 
 
-def _daily_volume_ratio_fallback(context, code, end_date):
-    """Fallback ranking ratio when minute data is unavailable.
+def _daily_volume_ratio_score(context, code, end_date):
+    """Daily ranking ratio.
 
     ratio = volume(T) / avg volume(T-1 ... T-5)
     """
@@ -922,15 +900,8 @@ def _process_b2_a_entry(context, code, trade_date, now, price):
                 state["last_bar_time"] = hhmm
                 continue
 
-            ma10 = _ma_on_close(bars, idx, 10)
-            if ma10 is not None and ma10 > 0:
-                if float(bar["low"]) < ma10 * (1.0 - PULLBACK_MA10_TOLERANCE):
-                    _reset_entry_pattern_state(state, hhmm)
-                    continue
-
-            first_body = max(float(state.get("first_close", 0.0)) - float(state.get("first_open", 0.0)), TICK_SIZE)
-            max_retrace_low = float(state.get("first_close", 0.0)) - first_body * PULLBACK_MAX_RETRACE_FIRST_BODY
-            if float(bar["low"]) < max_retrace_low:
+            zhixing_line = _zhixing_duokong_line_on_close(bars, idx)
+            if zhixing_line is not None and float(bar["close"]) < zhixing_line:
                 _reset_entry_pattern_state(state, hhmm)
                 continue
 
@@ -1008,15 +979,8 @@ def _match_graphic_pattern_on_bars(bars):
             state["last_bar_time"] = marker
             continue
 
-        ma10 = _ma_on_close(bars, idx, 10)
-        if ma10 is not None and ma10 > 0:
-            if float(bar["low"]) < ma10 * (1.0 - PULLBACK_MA10_TOLERANCE):
-                _reset_entry_pattern_state(state, marker)
-                continue
-
-        first_body = max(float(state.get("first_close", 0.0)) - float(state.get("first_open", 0.0)), TICK_SIZE)
-        max_retrace_low = float(state.get("first_close", 0.0)) - first_body * PULLBACK_MAX_RETRACE_FIRST_BODY
-        if float(bar["low"]) < max_retrace_low:
+        zhixing_line = _zhixing_duokong_line_on_close(bars, idx)
+        if zhixing_line is not None and float(bar["close"]) < zhixing_line:
             _reset_entry_pattern_state(state, marker)
             continue
 
@@ -1209,6 +1173,16 @@ def _ma_on_volume(bars, end_idx, period):
     for i in range(start_idx, end_idx + 1):
         total += float(bars[i]["volume"])
     return total / float(period)
+
+
+def _zhixing_duokong_line_on_close(bars, idx):
+    ma1 = _ma_on_close(bars, idx, ZHIXING_M1)
+    ma2 = _ma_on_close(bars, idx, ZHIXING_M2)
+    ma3 = _ma_on_close(bars, idx, ZHIXING_M3)
+    ma4 = _ma_on_close(bars, idx, ZHIXING_M4)
+    if ma1 is None or ma2 is None or ma3 is None or ma4 is None:
+        return None
+    return (ma1 + ma2 + ma3 + ma4) / 4.0
 
 
 def _try_place_buy(context, code, price, now, stop_low=None):
