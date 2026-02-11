@@ -44,6 +44,7 @@ VOLUME_RATIO_MIN = 20.0
 # Exclude auction stage; only continuous auction minutes are counted.
 VOLUME_RATIO_WINDOW_START = datetime.time(9, 30)
 VOLUME_RATIO_WINDOW_END = datetime.time(9, 35)
+TRADING_MINUTES_PER_DAY = 240.0
 WATCHLIST_SIZE = 3
 WATCHLIST_TIME = datetime.time(9, 35)
 
@@ -992,7 +993,7 @@ def calc_volume_ratio(context, code, trade_date, now):
 
     Formula:
       ratio = (today cumulative volume / elapsed minutes)
-              / (avg per-minute volume over past 5 trading days)
+              / (avg full-day per-minute volume over past 5 trading days)
     """
     window_start = VOLUME_RATIO_WINDOW_START.strftime("%H:%M")
     now_hhmm = now.strftime("%H:%M") if now else VOLUME_RATIO_WINDOW_END.strftime("%H:%M")
@@ -1032,17 +1033,19 @@ def calc_volume_ratio(context, code, trade_date, now):
     cum_detail = []
     for d in prev_dates:
         try:
-            d_bars = fetch_minute_bars(context, code, d, window_end, 300)
+            d_bars = fetch_minute_bars(context, code, d, "15:00", 600)
         except Exception:
             cum_detail.append("{0}=ERR".format(d))
             continue
         if not d_bars:
             cum_detail.append("{0}=EMPTY".format(d))
             continue
-        d_cum = _sum_window_volume(d_bars, window_start, window_end)
-        d_per_min = d_cum / elapsed_minutes if elapsed_minutes > 0 else 0.0
-        cum_detail.append("{0}={1:.0f}/{2:.1f}m={3:.2f}".format(d, d_cum, elapsed_minutes, d_per_min))
-        if d_cum > 0:
+        d_total = _sum_continuous_session_volume(d_bars)
+        d_per_min = d_total / TRADING_MINUTES_PER_DAY if TRADING_MINUTES_PER_DAY > 0 else 0.0
+        cum_detail.append(
+            "{0}={1:.0f}/{2:.0f}m={3:.2f}".format(d, d_total, TRADING_MINUTES_PER_DAY, d_per_min)
+        )
+        if d_total > 0:
             hist_per_min_list.append(d_per_min)
 
     if len(hist_per_min_list) < 5:
@@ -1059,7 +1062,7 @@ def calc_volume_ratio(context, code, trade_date, now):
     ratio = today_per_min / avg_prev_per_min
     _log(
         "vol_ratio_debug code={0} date={1} today={2:.0f}/{3:.1f}m={4:.2f} "
-        "avg_prev_per_min={5:.2f} ratio={6:.2f} hist=[{7}]".format(
+        "avg_prev_per_min(full_day)={5:.2f} ratio={6:.2f} hist=[{7}]".format(
             code,
             trade_date,
             today_cum,
@@ -1273,6 +1276,24 @@ def _sum_window_volume(bars, start_hhmm, end_hhmm):
             except Exception:
                 continue
     return total
+
+
+def _sum_continuous_session_volume(bars):
+    total = 0.0
+    for b in bars:
+        t = b.get("time", "")
+        if _is_continuous_auction_time(t):
+            try:
+                total += float(b.get("volume", 0.0))
+            except Exception:
+                continue
+    return total
+
+
+def _is_continuous_auction_time(hhmm):
+    if not hhmm:
+        return False
+    return ("09:30" <= hhmm <= "11:30") or ("13:00" <= hhmm <= "15:00")
 
 
 def _elapsed_minutes_between_hhmm(start_hhmm, end_hhmm):
