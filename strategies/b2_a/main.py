@@ -11,7 +11,7 @@ Rules (current):
   4) T volume >= 1.5 * T-1 volume
   5) T upper shadow < 20% of full candle range
 - At T+1 09:35: from candidates, pick top 3 by volume ratio (>5).
-- Entry: first-cannon / pullback / second-cannon pattern on 1m bars.
+- Entry: buy selected top3 at 09:35; failed orders retry next minute.
 """
 
 import datetime
@@ -42,11 +42,11 @@ DAILY_VOLUME_RATIO_MIN = 1.5
 UPPER_SHADOW_MAX_RATIO = 0.20
 
 VOLUME_RATIO_MIN = 5.0
-# Legacy fields kept for helper compatibility (volume-ratio watchlist filter is disabled in b2_a).
 VOLUME_RATIO_WINDOW_START = datetime.time(9, 30)
 VOLUME_RATIO_WINDOW_END = datetime.time(9, 35)
 TRADING_MINUTES_PER_DAY = 240.0
 WATCHLIST_SIZE = 3
+WATCHLIST_TIME = datetime.time(9, 35)
 
 MINUTE_BAR_PERIOD = "1m"
 BATCH_FETCH_CHUNK_SIZE = 200
@@ -73,7 +73,7 @@ PULLBACK_MAX_BAR_VOL_RATIO = 1.00
 SECOND_CANNON_MIN_FIRST_VOL_RATIO = 0.80
 SECOND_CANNON_VOL_MA_MULT = 1.00
 REBOUND_LOOKBACK = 5
-REBOUND_LOCAL_LOW_TICKS = 3.0
+REBOUND_LOCAL_LOW_TICKS = 1.0
 
 ORDER_CASH = 20000.0
 ENABLE_TRADING = True  # exit rules defined, ready for trading (adapters required)
@@ -578,6 +578,7 @@ def init(context):
     g.bought = set()
     g.pending_buy = {}
     g.pending_buy_stop_low = {}
+    g.entry_submitted = set()
     g.entry_check_stats = {}
     g.entry_price = {}
     g.buy_day_low = {}
@@ -619,6 +620,7 @@ def handlebar(context):
         g.bought = set()
         g.pending_buy = {}
         g.pending_buy_stop_low = {}
+        g.entry_submitted = set()
         g.entry_check_stats = {}
         g.logged_once = set()
 
@@ -630,15 +632,15 @@ def handlebar(context):
             )
         )
 
-    # Build watchlist once per day from daily candidates (no 09:35 volume-ratio filter).
-    if not g.watchlist_built:
+    # Build watchlist at 09:35 using volume-ratio top3.
+    if (not g.watchlist_built) and now.time() >= WATCHLIST_TIME:
         g.watchlist = build_watchlist(context, trade_date, now)
         g.watchlist_built = True
         _log("watchlist built size={0}".format(len(g.watchlist)))
         if g.watchlist:
             _log("watchlist sample={0}".format(",".join(g.watchlist[:5])))
 
-    # Monitor watchlist for entry and retry pending orders
+    # At/after 09:35, place entry for selected top3 once; failed orders retry next minute.
     for code in g.watchlist:
         try:
             price = get_current_price(context, code)
@@ -654,10 +656,16 @@ def handlebar(context):
         if st is None:
             st = {"checks": 0, "hits": 0}
             g.entry_check_stats[code] = st
-        st["checks"] += 1
 
-        if _process_b2_a_entry(context, code, trade_date, now, price):
+        if (
+            now.time() >= WATCHLIST_TIME
+            and code not in g.entry_submitted
+            and code not in g.pending_buy
+        ):
+            st["checks"] += 1
             st["hits"] += 1
+            g.entry_submitted.add(code)
+            _try_place_buy(context, code, price, now)
 
         # If prior buy failed, retry at next minute with latest price
         if code in g.pending_buy and now >= g.pending_buy[code]:
@@ -775,22 +783,57 @@ def build_daily_candidates(context, t_date):
 
 
 def build_watchlist(context, trade_date, now):
-    # Directly use all daily candidates; no early-session volume-ratio filter.
-    watchlist = []
-    seen = set()
-    for code in g.daily_candidates:
-        c = normalize_stock_code(code)
-        if not c or c in seen:
-            continue
-        seen.add(c)
-        watchlist.append(c)
+    ranked = []
+    stats = {
+        "total_candidates": len(g.daily_candidates),
+        "vol_ratio_none": 0,
+        "vol_ratio_low": 0,
+    }
+    prev_dates = get_prev_trading_dates(context, trade_date, 5)
+    prefetch = _prefetch_volume_ratio_data(context, g.daily_candidates, trade_date, now, prev_dates)
     _log(
-        "watchlist_stats total_candidates={0} selected={1} mode=no_vol_ratio_filter".format(
-            len(g.daily_candidates), len(watchlist)
+        "volume_ratio_window={0}-{1}".format(
+            VOLUME_RATIO_WINDOW_START.strftime("%H:%M"),
+            VOLUME_RATIO_WINDOW_END.strftime("%H:%M"),
         )
     )
-    if watchlist:
-        _log("watchlist_sample={0}".format(",".join(watchlist[:5])))
+    for code in g.daily_candidates:
+        decided, vol_ratio = _calc_volume_ratio_prefetched(
+            code=code,
+            prev_dates=prev_dates,
+            elapsed_minutes=prefetch.get("elapsed_minutes", 0.0),
+            window_start=prefetch.get("window_start", ""),
+            window_end=prefetch.get("window_end", ""),
+            today_bars_by_code=prefetch.get("today_bars_by_code", {}),
+            hist_bars_by_date=prefetch.get("hist_bars_by_date", {}),
+            today_prefetch_ok=prefetch.get("today_prefetch_ok", False),
+            hist_prefetch_ok_by_date=prefetch.get("hist_prefetch_ok_by_date", {}),
+        )
+        if not decided:
+            vol_ratio = calc_volume_ratio(context, code, trade_date, now)
+        if vol_ratio is None:
+            stats["vol_ratio_none"] += 1
+            continue
+        if vol_ratio <= VOLUME_RATIO_MIN:
+            stats["vol_ratio_low"] += 1
+            continue
+        ranked.append((code, vol_ratio))
+
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
+    _log(
+        "watchlist_stats total_candidates={0} vol_ratio_none={1} vol_ratio_low={2} "
+        "passed={3} selected={4}".format(
+            stats["total_candidates"],
+            stats["vol_ratio_none"],
+            stats["vol_ratio_low"],
+            len(ranked),
+            len(watchlist),
+        )
+    )
+    if ranked:
+        top = ",".join(["{0}:{1:.2f}".format(c, v) for c, v in ranked[:5]])
+        _log("watchlist_rank_top={0}".format(top))
     return watchlist
 
 
@@ -936,7 +979,8 @@ def _is_second_cannon_bar(bars, idx, state):
     if idx <= 1:
         return False
     pullback_low = state.get("pullback_low")
-    if pullback_low is None:
+    pullback_high = state.get("pullback_high")
+    if pullback_low is None or pullback_high is None:
         return False
     if not state.get("pullback_has_shrink", False):
         return False
@@ -952,8 +996,10 @@ def _is_second_cannon_bar(bars, idx, state):
     avg_line = _intraday_avg_price_line(bars, idx)
     if avg_line is None:
         return False
-    # Entry timing: below intraday average-price line and intraday line starts rebounding.
+    # Entry timing: still below intraday average-price line and intraday line starts rebounding.
     if close >= avg_line:
+        return False
+    if prev_close >= avg_line:
         return False
     # Rebound inflection on intraday line: down then up.
     if prev_close >= (prev2_close - TICK_SIZE):
