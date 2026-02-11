@@ -50,6 +50,7 @@ WATCHLIST_SIZE = 3
 WATCHLIST_TIME = datetime.time(9, 35)
 
 MINUTE_BAR_PERIOD = "1m"
+BATCH_FETCH_CHUNK_SIZE = 200
 
 ENTRY_TICK_MIN = 3
 ENTRY_TICK_MAX = None  # if price jumps above 4 ticks, still buy
@@ -322,24 +323,72 @@ def fetch_minute_bars(context, code, trade_date, end_time, count):
     if df is None or df.empty:
         return []
 
-    bars = []
-    for idx, row in df.iterrows():
-        d, hhmm = _extract_yyyymmdd_hhmm(idx)
-        if d != trade_date or (hhmm and hhmm > end_hhmm):
-            continue
-        if not hhmm:
-            continue
-        bars.append(
-            {
-                "time": hhmm[:2] + ":" + hhmm[2:],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-            }
-        )
-    return bars
+    return _minute_df_to_bars(df, trade_date, end_hhmm)
+
+
+def fetch_minute_bars_batch(context, codes, trade_date, end_time, count):
+    """Batch fetch minute bars for codes on trade_date up to end_time.
+
+    Return: dict(code -> bars list)
+    """
+    result = {}
+    if not codes:
+        return result
+
+    trade_date = _normalize_trade_date(trade_date)
+    if not trade_date:
+        return result
+
+    end_hhmm = "".join(ch for ch in str(end_time) if ch.isdigit())[:4]
+    if len(end_hhmm) != 4:
+        end_hhmm = "1500"
+    end_ts = trade_date + end_hhmm + "00"
+    start_ts_day = trade_date + "090000"
+
+    query_plan = [
+        {"start_time": start_ts_day, "end_time": end_ts, "subscribe": False, "count": max(count, 480)},
+        {"start_time": start_ts_day, "end_time": end_ts, "subscribe": True, "count": max(count, 480)},
+        {"start_time": "", "end_time": end_ts, "subscribe": False, "count": count},
+        {"start_time": "", "end_time": end_ts, "subscribe": True, "count": count},
+    ]
+
+    for batch_codes in _chunked_unique_codes(codes, BATCH_FETCH_CHUNK_SIZE):
+        pending = set(batch_codes)
+        for q in query_plan:
+            if not pending:
+                break
+            try:
+                data = context.get_market_data_ex(
+                    ["open", "high", "low", "close", "volume"],
+                    list(pending),
+                    period="1m",
+                    start_time=q["start_time"],
+                    end_time=q["end_time"],
+                    count=q["count"],
+                    dividend_type="none",
+                    fill_data=True,
+                    subscribe=q["subscribe"],
+                )
+            except Exception:
+                continue
+            if not data:
+                continue
+            hit_codes = []
+            for code in pending:
+                try:
+                    df = data.get(code)
+                except Exception:
+                    df = None
+                if df is None or df.empty:
+                    continue
+                bars = _minute_df_to_bars(df, trade_date, end_hhmm)
+                if bars:
+                    result[code] = bars
+                    hit_codes.append(code)
+            for code in hit_codes:
+                pending.discard(code)
+
+    return result
 
 
 def get_current_price(context, code):
@@ -708,6 +757,8 @@ def build_watchlist(context, trade_date, now):
         "vol_ratio_none": 0,
         "vol_ratio_low": 0,
     }
+    prev_dates = get_prev_trading_dates(context, trade_date, 5)
+    prefetch = _prefetch_volume_ratio_data(context, g.daily_candidates, trade_date, now, prev_dates)
     _log(
         "volume_ratio_window={0}-{1}".format(
             VOLUME_RATIO_WINDOW_START.strftime("%H:%M"),
@@ -715,7 +766,19 @@ def build_watchlist(context, trade_date, now):
         )
     )
     for code in g.daily_candidates:
-        vol_ratio = calc_volume_ratio(context, code, trade_date, now)
+        decided, vol_ratio = _calc_volume_ratio_prefetched(
+            code=code,
+            prev_dates=prev_dates,
+            elapsed_minutes=prefetch.get("elapsed_minutes", 0.0),
+            window_start=prefetch.get("window_start", ""),
+            window_end=prefetch.get("window_end", ""),
+            today_bars_by_code=prefetch.get("today_bars_by_code", {}),
+            hist_bars_by_date=prefetch.get("hist_bars_by_date", {}),
+            today_prefetch_ok=prefetch.get("today_prefetch_ok", False),
+            hist_prefetch_ok_by_date=prefetch.get("hist_prefetch_ok_by_date", {}),
+        )
+        if not decided:
+            vol_ratio = calc_volume_ratio(context, code, trade_date, now)
         if vol_ratio is None:
             stats["vol_ratio_none"] += 1
             continue
@@ -1073,6 +1136,90 @@ def calc_volume_ratio(context, code, trade_date, now):
     return ratio
 
 
+def _prefetch_volume_ratio_data(context, codes, trade_date, now, prev_dates):
+    window_start = VOLUME_RATIO_WINDOW_START.strftime("%H:%M")
+    now_hhmm = now.strftime("%H:%M") if now else VOLUME_RATIO_WINDOW_END.strftime("%H:%M")
+    if now_hhmm < window_start:
+        now_hhmm = window_start
+    window_end = min(now_hhmm, VOLUME_RATIO_WINDOW_END.strftime("%H:%M"))
+    elapsed_minutes = _elapsed_minutes_between_hhmm(window_start, window_end)
+
+    data = {
+        "window_start": window_start,
+        "window_end": window_end,
+        "elapsed_minutes": elapsed_minutes,
+        "today_bars_by_code": {},
+        "hist_bars_by_date": {},
+        "today_prefetch_ok": False,
+        "hist_prefetch_ok_by_date": {},
+    }
+    if elapsed_minutes <= 0 or not codes:
+        return data
+
+    try:
+        data["today_bars_by_code"] = fetch_minute_bars_batch(context, codes, trade_date, window_end, 300)
+        data["today_prefetch_ok"] = True
+    except Exception:
+        data["today_bars_by_code"] = {}
+        data["today_prefetch_ok"] = False
+
+    for d in prev_dates[:5]:
+        try:
+            bars_by_code = fetch_minute_bars_batch(context, codes, d, "15:00", 600)
+            data["hist_prefetch_ok_by_date"][d] = True
+        except Exception:
+            bars_by_code = {}
+            data["hist_prefetch_ok_by_date"][d] = False
+        data["hist_bars_by_date"][d] = bars_by_code
+    return data
+
+
+def _calc_volume_ratio_prefetched(
+    code,
+    prev_dates,
+    elapsed_minutes,
+    window_start,
+    window_end,
+    today_bars_by_code,
+    hist_bars_by_date,
+    today_prefetch_ok,
+    hist_prefetch_ok_by_date,
+):
+    if elapsed_minutes <= 0:
+        return True, None
+    if len(prev_dates) < 5:
+        return True, None
+    if not today_prefetch_ok:
+        return False, None
+
+    bars = today_bars_by_code.get(code, [])
+    if not bars:
+        return True, None
+    today_cum = _sum_window_volume(bars, window_start, window_end)
+    if today_cum <= 0:
+        return True, None
+    today_per_min = today_cum / elapsed_minutes
+
+    hist_per_min_list = []
+    for d in prev_dates[:5]:
+        if not hist_prefetch_ok_by_date.get(d, False):
+            return False, None
+        d_bars = hist_bars_by_date.get(d, {}).get(code, [])
+        if not d_bars:
+            continue
+        d_total = _sum_continuous_session_volume(d_bars)
+        d_per_min = d_total / TRADING_MINUTES_PER_DAY if TRADING_MINUTES_PER_DAY > 0 else 0.0
+        if d_total > 0:
+            hist_per_min_list.append(d_per_min)
+
+    if len(hist_per_min_list) < 5:
+        return True, None
+    avg_prev_per_min = sum(hist_per_min_list) / 5.0
+    if avg_prev_per_min <= 0:
+        return True, None
+    return True, (today_per_min / avg_prev_per_min)
+
+
 def is_downtrend(context, code, trade_date, now):
     """Placeholder for downtrend definition.
 
@@ -1347,6 +1494,51 @@ def _daily_df_to_bars(df):
         except Exception:
             continue
     return bars
+
+
+def _minute_df_to_bars(df, trade_date, end_hhmm):
+    bars = []
+    try:
+        iterator = df.iterrows()
+    except Exception:
+        return bars
+
+    for idx, row in iterator:
+        d, hhmm = _extract_yyyymmdd_hhmm(idx)
+        if d != trade_date or (hhmm and hhmm > end_hhmm):
+            continue
+        if not hhmm:
+            continue
+        try:
+            bars.append(
+                {
+                    "time": hhmm[:2] + ":" + hhmm[2:],
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
+            )
+        except Exception:
+            continue
+    return bars
+
+
+def _chunked_unique_codes(codes, chunk_size):
+    uniq = []
+    seen = set()
+    for c in codes or []:
+        n = normalize_stock_code(c)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        uniq.append(n)
+
+    if chunk_size <= 0:
+        chunk_size = len(uniq) or 1
+    for i in range(0, len(uniq), chunk_size):
+        yield uniq[i : i + chunk_size]
 
 
 def _log_end_of_day_entry_stats(trade_date):
