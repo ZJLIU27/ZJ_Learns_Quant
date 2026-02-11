@@ -41,7 +41,8 @@ DAILY_RETURN_MIN = 0.04
 UPPER_SHADOW_MAX_RATIO = 0.20
 
 VOLUME_RATIO_MIN = 20.0
-VOLUME_RATIO_WINDOW_START = datetime.time(9, 0)
+# Exclude auction stage; only continuous auction minutes are counted.
+VOLUME_RATIO_WINDOW_START = datetime.time(9, 30)
 VOLUME_RATIO_WINDOW_END = datetime.time(9, 35)
 WATCHLIST_SIZE = 3
 WATCHLIST_TIME = datetime.time(9, 35)
