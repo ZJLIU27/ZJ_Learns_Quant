@@ -987,13 +987,22 @@ def compute_kdj(bars, n, k_init, d_init):
 
 
 def calc_volume_ratio(context, code, trade_date, now):
-    """Calculate volume ratio for fixed window 09:00-09:35.
+    """Calculate volume ratio using per-minute volume.
 
-    Definition: today's cumulative volume in [09:00, 09:35] divided by
-    average cumulative volume in the same window over the past 5 trading days.
+    Formula:
+      ratio = (today cumulative volume / elapsed minutes)
+              / (avg per-minute volume over past 5 trading days)
     """
     window_start = VOLUME_RATIO_WINDOW_START.strftime("%H:%M")
-    window_end = VOLUME_RATIO_WINDOW_END.strftime("%H:%M")
+    now_hhmm = now.strftime("%H:%M") if now else VOLUME_RATIO_WINDOW_END.strftime("%H:%M")
+    if now_hhmm < window_start:
+        now_hhmm = window_start
+    window_end = min(now_hhmm, VOLUME_RATIO_WINDOW_END.strftime("%H:%M"))
+    elapsed_minutes = _elapsed_minutes_between_hhmm(window_start, window_end)
+    if elapsed_minutes <= 0:
+        _log("vol_ratio_debug code={0} date={1} elapsed_minutes=0 window={2}-{3}".format(
+            code, trade_date, window_start, window_end))
+        return None
 
     try:
         bars = fetch_minute_bars(context, code, trade_date, window_end, 300)
@@ -1010,6 +1019,7 @@ def calc_volume_ratio(context, code, trade_date, now):
         _log("vol_ratio_debug code={0} date={1} today_cum=0 (bars_count={2} window={3}-{4})".format(
             code, trade_date, len(bars), window_start, window_end))
         return None
+    today_per_min = today_cum / elapsed_minutes
 
     prev_dates = get_prev_trading_dates(context, trade_date, 5)
     if len(prev_dates) < 5:
@@ -1017,7 +1027,7 @@ def calc_volume_ratio(context, code, trade_date, now):
             code, trade_date, len(prev_dates)))
         return None
 
-    cum_list = []
+    hist_per_min_list = []
     cum_detail = []
     for d in prev_dates:
         try:
@@ -1029,24 +1039,36 @@ def calc_volume_ratio(context, code, trade_date, now):
             cum_detail.append("{0}=EMPTY".format(d))
             continue
         d_cum = _sum_window_volume(d_bars, window_start, window_end)
-        cum_detail.append("{0}={1:.0f}".format(d, d_cum))
+        d_per_min = d_cum / elapsed_minutes if elapsed_minutes > 0 else 0.0
+        cum_detail.append("{0}={1:.0f}/{2:.1f}m={3:.2f}".format(d, d_cum, elapsed_minutes, d_per_min))
         if d_cum > 0:
-            cum_list.append(d_cum)
+            hist_per_min_list.append(d_per_min)
 
-    if len(cum_list) < 5:
+    if len(hist_per_min_list) < 5:
         _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} hist_valid={3}/5 hist=[{4}]".format(
-            code, trade_date, today_cum, len(cum_list), ",".join(cum_detail)))
+            code, trade_date, today_cum, len(hist_per_min_list), ",".join(cum_detail)))
         return None
 
-    avg_prev = sum(cum_list) / 5.0
-    if avg_prev <= 0:
+    avg_prev_per_min = sum(hist_per_min_list) / 5.0
+    if avg_prev_per_min <= 0:
         _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} avg_prev=0".format(
             code, trade_date, today_cum))
         return None
 
-    ratio = today_cum / avg_prev
-    _log("vol_ratio_debug code={0} date={1} today_cum={2:.0f} avg_prev={3:.0f} ratio={4:.2f} hist=[{5}]".format(
-        code, trade_date, today_cum, avg_prev, ratio, ",".join(cum_detail)))
+    ratio = today_per_min / avg_prev_per_min
+    _log(
+        "vol_ratio_debug code={0} date={1} today={2:.0f}/{3:.1f}m={4:.2f} "
+        "avg_prev_per_min={5:.2f} ratio={6:.2f} hist=[{7}]".format(
+            code,
+            trade_date,
+            today_cum,
+            elapsed_minutes,
+            today_per_min,
+            avg_prev_per_min,
+            ratio,
+            ",".join(cum_detail),
+        )
+    )
     return ratio
 
 
@@ -1250,6 +1272,20 @@ def _sum_window_volume(bars, start_hhmm, end_hhmm):
             except Exception:
                 continue
     return total
+
+
+def _elapsed_minutes_between_hhmm(start_hhmm, end_hhmm):
+    try:
+        sh, sm = int(start_hhmm[:2]), int(start_hhmm[3:5])
+        eh, em = int(end_hhmm[:2]), int(end_hhmm[3:5])
+    except Exception:
+        return 0.0
+
+    start_m = sh * 60 + sm
+    end_m = eh * 60 + em
+    if end_m <= start_m:
+        return 0.0
+    return float(end_m - start_m)
 
 
 def _extract_yyyymmdd_hhmm(index_value):
