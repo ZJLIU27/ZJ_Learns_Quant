@@ -10,7 +10,9 @@ Rules (current):
   3) T daily return > 4%
   4) T volume >= 1.5 * T-1 volume
   5) T upper shadow < 20% of full candle range
-- At T+1 09:35: from candidates, pick top 3 by volume ratio (>5).
+- Graphic features are fully applied in selection layer on T-day 1m bars:
+  parallel -> first cannon -> pullback -> second-cannon rebound.
+- At T+1 09:35: from passed candidates, pick top 3 by volume ratio (>5).
 - Entry: buy selected top3 at 09:35; failed orders retry next minute.
 """
 
@@ -788,9 +790,12 @@ def build_watchlist(context, trade_date, now):
         "total_candidates": len(g.daily_candidates),
         "vol_ratio_none": 0,
         "vol_ratio_low": 0,
+        "pattern_fail": 0,
     }
+    pattern_date = get_trading_calendar_prev_date(context, trade_date)
     prev_dates = get_prev_trading_dates(context, trade_date, 5)
     prefetch = _prefetch_volume_ratio_data(context, g.daily_candidates, trade_date, now, prev_dates)
+    _log("graphic_pattern_date={0}".format(pattern_date))
     _log(
         "volume_ratio_window={0}-{1}".format(
             VOLUME_RATIO_WINDOW_START.strftime("%H:%M"),
@@ -817,16 +822,20 @@ def build_watchlist(context, trade_date, now):
         if vol_ratio <= VOLUME_RATIO_MIN:
             stats["vol_ratio_low"] += 1
             continue
+        if not _match_graphic_pattern_on_date(context, code, pattern_date):
+            stats["pattern_fail"] += 1
+            continue
         ranked.append((code, vol_ratio))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     watchlist = [code for code, _ in ranked[:WATCHLIST_SIZE]]
     _log(
         "watchlist_stats total_candidates={0} vol_ratio_none={1} vol_ratio_low={2} "
-        "passed={3} selected={4}".format(
+        "pattern_fail={3} passed={4} selected={5}".format(
             stats["total_candidates"],
             stats["vol_ratio_none"],
             stats["vol_ratio_low"],
+            stats["pattern_fail"],
             len(ranked),
             len(watchlist),
         )
@@ -920,6 +929,86 @@ def _process_b2_a_entry(context, code, trade_date, now, price):
 
     g.entry_patterns[code] = state
     return triggered
+
+
+def _match_graphic_pattern_on_date(context, code, trade_date):
+    """Return True if full b2_a graphic pattern appears on a given trade date."""
+    try:
+        bars = fetch_minute_bars(context, code, trade_date, "15:00", 600)
+    except Exception:
+        return False
+    if not bars:
+        return False
+    return _match_graphic_pattern_on_bars(bars)
+
+
+def _match_graphic_pattern_on_bars(bars):
+    """Detect: parallel -> first cannon -> pullback -> second-cannon rebound."""
+    state = {}
+    _reset_entry_pattern_state(state, "")
+
+    for idx, bar in enumerate(bars):
+        hhmm = bar.get("time", "")
+        if not hhmm:
+            continue
+
+        if state.get("stage") == "wait_first":
+            ok, zone_high = _is_first_cannon_bar(bars, idx)
+            if ok:
+                state["stage"] = "wait_pullback"
+                state["first_idx"] = idx
+                state["first_zone_high"] = zone_high
+                state["first_open"] = float(bar["open"])
+                state["first_close"] = float(bar["close"])
+                state["first_high"] = float(bar["high"])
+                state["first_low"] = float(bar["low"])
+                state["first_volume"] = float(bar["volume"])
+                state["pullback_low"] = None
+                state["pullback_high"] = None
+                state["pullback_has_shrink"] = False
+            state["last_bar_time"] = hhmm
+            continue
+
+        gap = idx - int(state.get("first_idx", -1))
+        if gap <= 0:
+            state["last_bar_time"] = hhmm
+            continue
+
+        ma10 = _ma_on_close(bars, idx, 10)
+        if ma10 is not None and ma10 > 0:
+            if float(bar["low"]) < ma10 * (1.0 - PULLBACK_MA10_TOLERANCE):
+                _reset_entry_pattern_state(state, hhmm)
+                continue
+
+        first_body = max(float(state.get("first_close", 0.0)) - float(state.get("first_open", 0.0)), TICK_SIZE)
+        max_retrace_low = float(state.get("first_close", 0.0)) - first_body * PULLBACK_MAX_RETRACE_FIRST_BODY
+        if float(bar["low"]) < max_retrace_low:
+            _reset_entry_pattern_state(state, hhmm)
+            continue
+
+        if gap > (PULLBACK_MAX_BARS + 1):
+            _reset_entry_pattern_state(state, hhmm)
+            continue
+
+        min_gap_for_second = PULLBACK_MIN_BARS + 1
+        if gap >= min_gap_for_second and _is_second_cannon_bar(bars, idx, state):
+            return True
+
+        if gap <= PULLBACK_MAX_BARS:
+            pullback_low = state.get("pullback_low")
+            pullback_high = state.get("pullback_high")
+            if pullback_low is None or float(bar["low"]) < pullback_low:
+                state["pullback_low"] = float(bar["low"])
+            if pullback_high is None or float(bar["high"]) > pullback_high:
+                state["pullback_high"] = float(bar["high"])
+
+            first_volume = float(state.get("first_volume", 0.0))
+            if first_volume > 0 and float(bar["volume"]) <= first_volume * PULLBACK_MAX_BAR_VOL_RATIO:
+                state["pullback_has_shrink"] = True
+
+        state["last_bar_time"] = hhmm
+
+    return False
 
 
 def _reset_entry_pattern_state(state, last_bar_time):
