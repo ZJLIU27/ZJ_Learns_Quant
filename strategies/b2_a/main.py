@@ -806,13 +806,27 @@ def build_watchlist(context, trade_date, now):
         "total_candidates": len(g.daily_candidates),
         "daily_rank_none": 0,
         "pattern_fail": 0,
+        "sig_first_hit": 0,
+        "sig_second_checked": 0,
+        "sig_second_pass": 0,
     }
+    fail_reason_counts = {}
     pattern_date = get_trading_calendar_prev_date(context, trade_date)
     _log("graphic_pattern_date={0}".format(pattern_date))
     _log("ranking_metric=daily_volume_ratio(T/avg5)")
     for code in g.daily_candidates:
-        if not _match_graphic_pattern_on_date(context, code, pattern_date):
+        matched, sig = _match_graphic_pattern_with_signal_on_date(context, code, pattern_date)
+        if sig.get("first_hit", False):
+            stats["sig_first_hit"] += 1
+        if sig.get("second_checked", False):
+            stats["sig_second_checked"] += 1
+        if sig.get("second_pass", False):
+            stats["sig_second_pass"] += 1
+
+        if not matched:
             stats["pattern_fail"] += 1
+            reason = sig.get("fail_reason", "unknown")
+            fail_reason_counts[reason] = fail_reason_counts.get(reason, 0) + 1
             continue
 
         rank_score = _daily_volume_ratio_score(context, code, pattern_date)
@@ -833,6 +847,19 @@ def build_watchlist(context, trade_date, now):
             len(watchlist),
         )
     )
+    _log(
+        "pattern_signal_stats total_candidates={0} first_hit={1} "
+        "second_checked={2} second_pass={3}".format(
+            stats["total_candidates"],
+            stats["sig_first_hit"],
+            stats["sig_second_checked"],
+            stats["sig_second_pass"],
+        )
+    )
+    if fail_reason_counts:
+        sorted_reasons = sorted(fail_reason_counts.items(), key=lambda x: x[1], reverse=True)
+        top = ",".join(["{0}:{1}".format(k, v) for k, v in sorted_reasons[:5]])
+        _log("pattern_fail_reason_top={0}".format(top))
     if ranked:
         top = ",".join(["{0}:{1:.2f}".format(c, v) for c, v in ranked[:5]])
         _log("watchlist_rank_top={0}".format(top))
@@ -938,21 +965,48 @@ def _process_b2_a_entry(context, code, trade_date, now, price):
     return triggered
 
 
-def _match_graphic_pattern_on_date(context, code, trade_date):
-    """Return True if full b2_a graphic pattern appears on daily bars up to trade_date."""
+def _match_graphic_pattern_with_signal_on_date(context, code, trade_date):
+    """Return (matched, signal) for b2_a graphic pattern on daily bars."""
+    signal = {
+        "first_hit": False,
+        "second_checked": False,
+        "second_pass": False,
+        "fail_reason": "unknown",
+    }
     try:
         bars = fetch_daily_bars(context, code, trade_date, 120)
     except Exception:
-        return False
+        signal["fail_reason"] = "daily_fetch_error"
+        return False, signal
     if not bars:
-        return False
-    return _match_graphic_pattern_on_bars(bars)
+        signal["fail_reason"] = "bars_empty"
+        return False, signal
+    return _match_graphic_pattern_with_signal_on_bars(bars)
 
 
 def _match_graphic_pattern_on_bars(bars):
     """Detect: parallel -> first cannon -> pullback -> second-cannon rebound."""
+    matched, _ = _match_graphic_pattern_with_signal_on_bars(bars)
+    return matched
+
+
+def _match_graphic_pattern_on_date(context, code, trade_date):
+    """Backward-compatible bool matcher."""
+    matched, _ = _match_graphic_pattern_with_signal_on_date(context, code, trade_date)
+    return matched
+
+
+def _match_graphic_pattern_with_signal_on_bars(bars):
+    """Detect: parallel -> first cannon -> pullback -> second-cannon rebound."""
     state = {}
     _reset_entry_pattern_state(state, "")
+    signal = {
+        "first_hit": False,
+        "second_checked": False,
+        "second_pass": False,
+        "fail_reason": "first_not_found",
+    }
+    second_fail_counts = {}
 
     for idx, bar in enumerate(bars):
         marker = bar.get("time", "") or bar.get("date", "") or str(idx)
@@ -960,6 +1014,7 @@ def _match_graphic_pattern_on_bars(bars):
         if state.get("stage") == "wait_first":
             ok, zone_high = _is_first_cannon_bar(bars, idx)
             if ok:
+                signal["first_hit"] = True
                 state["stage"] = "wait_pullback"
                 state["first_idx"] = idx
                 state["first_zone_high"] = zone_high
@@ -981,16 +1036,24 @@ def _match_graphic_pattern_on_bars(bars):
 
         zhixing_line = _zhixing_duokong_line_on_close(bars, idx)
         if zhixing_line is not None and float(bar["close"]) < zhixing_line:
+            signal["fail_reason"] = "pullback_break_zhixing"
             _reset_entry_pattern_state(state, marker)
             continue
 
         if gap > (PULLBACK_MAX_BARS + 1):
+            signal["fail_reason"] = "pullback_timeout"
             _reset_entry_pattern_state(state, marker)
             continue
 
         min_gap_for_second = PULLBACK_MIN_BARS + 1
-        if gap >= min_gap_for_second and _is_second_cannon_bar(bars, idx, state):
-            return True
+        if gap >= min_gap_for_second:
+            signal["second_checked"] = True
+            second_ok, second_reason = _is_second_cannon_bar_with_reason(bars, idx, state)
+            if second_ok:
+                signal["second_pass"] = True
+                signal["fail_reason"] = ""
+                return True, signal
+            second_fail_counts[second_reason] = second_fail_counts.get(second_reason, 0) + 1
 
         if gap <= PULLBACK_MAX_BARS:
             pullback_low = state.get("pullback_low")
@@ -1006,7 +1069,14 @@ def _match_graphic_pattern_on_bars(bars):
 
         state["last_bar_time"] = marker
 
-    return False
+    if second_fail_counts and (not signal["second_pass"]):
+        top_second_reason = sorted(second_fail_counts.items(), key=lambda x: x[1], reverse=True)[0][0]
+        signal["fail_reason"] = "second_fail_{0}".format(top_second_reason)
+    elif signal["first_hit"] and (not signal["second_checked"]):
+        signal["fail_reason"] = "pullback_not_ready_for_second"
+    elif signal["first_hit"] and signal["second_checked"] and (not signal["second_pass"]):
+        signal["fail_reason"] = "second_not_triggered"
+    return False, signal
 
 
 def _reset_entry_pattern_state(state, last_bar_time):
@@ -1063,18 +1133,23 @@ def _is_first_cannon_bar(bars, idx):
 
 
 def _is_second_cannon_bar(bars, idx, state):
+    ok, _ = _is_second_cannon_bar_with_reason(bars, idx, state)
+    return ok
+
+
+def _is_second_cannon_bar_with_reason(bars, idx, state):
     if idx <= 1:
-        return False
+        return False, "idx_too_small"
     pullback_low = state.get("pullback_low")
     pullback_high = state.get("pullback_high")
     if pullback_low is None or pullback_high is None:
-        return False
+        return False, "pullback_range_missing"
     if not state.get("pullback_has_shrink", False):
-        return False
+        return False, "no_pullback_shrink"
 
     first_volume = float(state.get("first_volume", 0.0))
     if first_volume <= 0:
-        return False
+        return False, "first_volume_invalid"
 
     bar = bars[idx]
     close = float(bar["close"])
@@ -1082,25 +1157,25 @@ def _is_second_cannon_bar(bars, idx, state):
     prev_close = float(bars[idx - 1]["close"])
     # Rebound inflection: down then up.
     if prev_close >= (prev2_close - TICK_SIZE):
-        return False
+        return False, "rebound_prev_not_down"
     if close <= (prev_close + TICK_SIZE):
-        return False
+        return False, "rebound_current_not_up"
     # Previous bar should be near local low in recent minutes.
     start = max(0, idx - REBOUND_LOOKBACK)
     recent_min = min(float(bars[i]["close"]) for i in range(start, idx))
     if prev_close > (recent_min + REBOUND_LOCAL_LOW_TICKS * TICK_SIZE):
-        return False
+        return False, "rebound_prev_not_local_low"
 
     vol_ma = _ma_on_volume(bars, idx - 1, 5)
     if vol_ma is None or vol_ma <= 0:
-        return False
+        return False, "vol_ma_invalid"
 
     volume = float(bar["volume"])
     if volume < first_volume * SECOND_CANNON_MIN_FIRST_VOL_RATIO:
-        return False
+        return False, "volume_lt_first_ratio"
     if volume <= vol_ma * SECOND_CANNON_VOL_MA_MULT:
-        return False
-    return True
+        return False, "volume_le_ma"
+    return True, "ok"
 
 
 def _parallel_context_ok(bars, end_idx):
