@@ -30,3 +30,16 @@
 ## 参考文档
 - 迅投知识库《使用说明》：[docs.thinktrader.net](https://docs.thinktrader.net/pages/91d44f/)
 - 迅投知识库《使用须知》：[dict.thinktrader.net](https://dict.thinktrader.net/innerApi/user_attention.html)
+
+## 定制参数
+M1:=14;
+
+M2:=28;
+
+M3:=57;
+
+M4:=114;
+
+知行短期趋势线:=EMA(EMA(C,10),10);
+
+知行多空线:=(MA(CLOSE,M1)+MA(CLOSE,M2)+MA(CLOSE,M3)+MA(CLOSE,M4))/4;
