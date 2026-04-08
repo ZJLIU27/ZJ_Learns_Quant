@@ -1,0 +1,15 @@
+{
+    "tushare_token": "YOUR_TUSHARE_TOKEN_HERE",
+    "data_dir": "D:/Git/QuanToolkit/data",
+    "start_date": "20240101",
+    "end_date": "20251231",
+    "initial_capital": 1000000,
+    "max_positions": 3,
+    "kdj_n": 9,
+    "kdj_init": 50.0,
+    "j_pre_max": 20.0,
+    "j_now_max": 65.0,
+    "daily_return_min_pct": 4.0,
+    "vol_ratio_min": 1.1,
+    "output_dir": "output"
+}

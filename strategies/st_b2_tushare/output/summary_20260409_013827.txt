@@ -1,0 +1,12 @@
+==================================================
+  st_b2 Tushare Backtest Summary
+==================================================
+  Initial Capital:          1,000,000
+  Final Equity:          3,325,377.00
+  Total Return:               232.54%
+  Max Drawdown:                30.94%
+  Trade Count:                    643
+  Win Rate:                    49.77%
+  Avg Return/Trade:             0.62%
+  Median Return:                0.00%
+==================================================
