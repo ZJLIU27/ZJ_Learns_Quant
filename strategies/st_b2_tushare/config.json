@@ -11,5 +11,9 @@
     "j_now_max": 65.0,
     "daily_return_min_pct": 4.0,
     "vol_ratio_min": 1.1,
+    "slippage_pct": 0.1,
+    "commission_pct": 0.025,
+    "stamp_tax_pct": 0.05,
+    "transfer_fee_pct": 0.001,
     "output_dir": "output"
 }
