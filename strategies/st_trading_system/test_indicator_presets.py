@@ -38,7 +38,7 @@ def test_list_indicator_presets_and_defaults():
     preset_ids = [preset.id for preset in list_indicator_presets()]
     assert preset_ids == ["bbi", "white_line", "yellow_line", "danzhen_panel", "zhuan_panel"]
     assert get_default_indicator_ids(["b1"]) == ["bbi", "white_line", "yellow_line"]
-    assert get_default_indicator_ids(["danzhen20"]) == ["danzhen_panel"]
+    assert get_default_indicator_ids(["danzhen20"]) == ["white_line", "yellow_line", "danzhen_panel"]
     assert get_default_indicator_ids(["zhuan"]) == ["zhuan_panel"]
     assert get_default_indicator_ids(["b1", "zhuan"]) == ["bbi", "white_line", "yellow_line", "zhuan_panel"]
 

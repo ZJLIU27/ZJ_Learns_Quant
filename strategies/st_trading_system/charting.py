@@ -110,40 +110,10 @@ def build_stock_chart(
         subcharts.append(
             ChartPanelSpec(
                 panel_id="danzhen_panel",
-                title="单针下20",
+                title="单针下20/30",
                 traces=[
-                    ChartTraceSpec(kind="line", name="短", y_column="danzhen_short", color="#FFFFFF"),
-                    ChartTraceSpec(kind="line", name="中", y_column="danzhen_medium", color="#F0B90B"),
-                    ChartTraceSpec(kind="line", name="中长", y_column="danzhen_medium_long", color="#FF00FF"),
-                    ChartTraceSpec(kind="line", name="长", y_column="danzhen_long", color="#F6465D", width=2.0),
-                    ChartTraceSpec(
-                        kind="bar",
-                        name="四线0",
-                        y_column="danzhen_four_line_zero",
-                        color="#0000FF",
-                        opacity=0.45,
-                    ),
-                    ChartTraceSpec(
-                        kind="bar",
-                        name="短下20",
-                        y_column="danzhen_short_below_20",
-                        color="#00FFFF",
-                        opacity=0.45,
-                    ),
-                    ChartTraceSpec(
-                        kind="bar",
-                        name="短穿中长",
-                        y_column="danzhen_short_cross_long",
-                        color="#00FF00",
-                        opacity=0.45,
-                    ),
-                    ChartTraceSpec(
-                        kind="bar",
-                        name="短穿中",
-                        y_column="danzhen_short_cross_medium",
-                        color="#FF9150",
-                        opacity=0.45,
-                    ),
+                    ChartTraceSpec(kind="line", name="白线(短)", y_column="danzhen_short", color="#FFFFFF", width=1.4),
+                    ChartTraceSpec(kind="line", name="红线(长)", y_column="danzhen_long", color="#F6465D", width=2.0),
                 ],
                 hlines=[
                     ChartHorizontalLine(y=20.0, color="#0ECB81"),

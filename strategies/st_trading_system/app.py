@@ -277,17 +277,27 @@ def _resolve_selected_screen_code(
     return codes[0]
 
 
+def _resolve_selected_screen_code_from_rows(
+    row_codes: list[str],
+    selected_rows: list[int],
+    previous_code: str | None,
+) -> str | None:
+    valid_selected_rows = [row for row in selected_rows if 0 <= row < len(row_codes)]
+    if valid_selected_rows:
+        return row_codes[valid_selected_rows[-1]]
+    if previous_code in row_codes:
+        return previous_code
+    if row_codes:
+        return row_codes[0]
+    return None
+
+
 def _resolve_screen_indicator_ids(
     hit_ids: list[str],
     manual_indicator_ids: list[str],
 ) -> list[str]:
     default_ids = get_default_indicator_ids(hit_ids)
     return list(dict.fromkeys(default_ids + list(manual_indicator_ids)))
-
-
-def _format_screening_option(code: str, result_map: dict[str, ScreeningResult]) -> str:
-    result = result_map[code]
-    return f"{code} | {', '.join(result.hit_ids)}"
 
 
 def _format_indicator_option(indicator_id: str) -> str:
@@ -480,9 +490,17 @@ def _tab_screener() -> None:
                     results,
                     st.session_state.get("selected_screen_code"),
                 )
+                st.session_state["screen_results_version"] = (
+                    int(st.session_state.get("screen_results_version", 0)) + 1
+                )
 
     results = st.session_state.get("last_screen_results", [])
     last_screen_date = st.session_state.get("last_screen_date", scan_date.strftime("%Y%m%d"))
+    sorted_results = sorted(results, key=lambda item: (-item.hit_count, item.code))
+    selected_result_code = _resolve_selected_screen_code(
+        sorted_results,
+        st.session_state.get("selected_screen_code"),
+    )
 
     with left_col:
         if not results:
@@ -490,7 +508,7 @@ def _tab_screener() -> None:
         else:
             st.markdown(f"**命中结果：{len(results)} 只**")
             rows: list[dict] = []
-            for result in results:
+            for result in sorted_results:
                 row = {
                     "code": result.code,
                     "hit_count": result.hit_count,
@@ -506,8 +524,25 @@ def _tab_screener() -> None:
                         row[key] = value
                 rows.append(row)
 
-            df = pd.DataFrame(rows).sort_values(["hit_count", "code"], ascending=[False, True]).reset_index(drop=True)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            df = pd.DataFrame(rows).reset_index(drop=True)
+            table_event = st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=f"screen_results_table_{st.session_state.get('screen_results_version', 0)}",
+            )
+            selected_rows = list(getattr(getattr(table_event, "selection", None), "rows", []) or [])
+            selected_result_code = _resolve_selected_screen_code_from_rows(
+                df["code"].tolist(),
+                selected_rows,
+                selected_result_code,
+            )
+            st.session_state["selected_screen_code"] = selected_result_code
+            st.caption(
+                f"当前详情：{selected_result_code or '-'} | 点击结果表行可直接切换右侧 K 线"
+            )
             st.download_button(
                 label="Export CSV",
                 data=df.to_csv(index=False).encode("utf-8-sig"),
@@ -521,22 +556,18 @@ def _tab_screener() -> None:
             st.info("先跑出结果，再在这里看单只股票的图。")
             return
 
-        result_map = {result.code: result for result in results}
-        resolved_code = _resolve_selected_screen_code(results, st.session_state.get("selected_screen_code"))
+        result_map = {result.code: result for result in sorted_results}
+        resolved_code = _resolve_selected_screen_code(
+            sorted_results,
+            st.session_state.get("selected_screen_code"),
+        )
         if resolved_code is None:
             st.info("当前没有可展示的标的。")
             return
 
         st.session_state["selected_screen_code"] = resolved_code
         st.session_state["selected_screen_date"] = last_screen_date
-
-        selected_code = st.selectbox(
-            "当前标的",
-            options=list(result_map.keys()),
-            format_func=lambda code: _format_screening_option(code, result_map),
-            key="selected_screen_code",
-        )
-        selected_result = result_map[selected_code]
+        selected_result = result_map[resolved_code]
 
         valid_indicator_ids = [preset.id for preset in list_indicator_presets()]
         manual_indicator_ids = [

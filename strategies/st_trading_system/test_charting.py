@@ -66,6 +66,7 @@ def test_build_stock_chart_adds_expected_panels():
     assert bundle is not None
     assert [trace.name for trace in bundle.main_panel.traces] == ["OHLC", "BBI", "白线", "黄线"]
     assert [panel.panel_id for panel in bundle.subcharts] == ["danzhen_panel", "zhuan_panel"]
+    assert [trace.name for trace in bundle.subcharts[0].traces] == ["白线(短)", "红线(长)"]
     assert len(bundle.subcharts[0].hlines) == 2
 
 
