@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
+.claude/settings.local.json
+tmp.json
+strategies/st_b2_tushare/output/
 strategies/st_trading_system/portfolio.json
 strategies/st_trading_system/tmp*/
