@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+strategies/st_trading_system/portfolio.json
+strategies/st_trading_system/tmp*/

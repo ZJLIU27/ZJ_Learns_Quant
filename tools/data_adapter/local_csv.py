@@ -3,7 +3,8 @@
 Loads daily OHLCV data from local CSV files produced by tushare export.
 Canonical DataFrame schema: trade_date, open, high, low, close, vol
 
-Main board filtering: only stocks with prefixes 000, 001, 002, 600, 601, 603, 605.
+By default the stock universe is limited to main-board A-shares. Callers can
+optionally include growth boards (300/688/689) when scanning.
 """
 
 import warnings
@@ -21,14 +22,16 @@ def is_main_board(code: str) -> bool:
     return code.startswith(MAIN_BOARD_PREFIXES)
 
 
-def get_stock_list(data_dir: str) -> list[str]:
-    """Scan data_dir for CSV files and return main-board stock codes.
+def get_stock_list(data_dir: str, include_growth_boards: bool = False) -> list[str]:
+    """Scan data_dir for CSV files and return A-share stock codes.
 
     Args:
         data_dir: Path to directory containing <code>.csv files.
+        include_growth_boards: If True, also include 创业板 (300) and 科创板
+            (688/689). Default False keeps the previous main-board-only behavior.
 
     Returns:
-        Sorted list of main-board stock code strings (e.g. ['000001', '000002', ...]).
+        Sorted list of stock code strings.
     """
     data_path = Path(data_dir)
     if not data_path.exists():
@@ -38,6 +41,8 @@ def get_stock_list(data_dir: str) -> list[str]:
     for csv_file in data_path.glob("*.csv"):
         code = csv_file.stem
         if is_main_board(code):
+            codes.append(code)
+        elif include_growth_boards and code.startswith(("300", "688", "689")):
             codes.append(code)
     return sorted(codes)
 
