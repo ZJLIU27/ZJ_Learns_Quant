@@ -75,21 +75,24 @@ def test_b1_rejects_on_constructed_negative():
 
 def test_danzhen20_trigger_and_reject():
     strategy = get_substrategy("danzhen20")
-    closes = [10 + i * 0.4 for i in range(22)] + [18.5, 18.0, 17.8]
+    closes = [10 + i * 0.4 for i in range(40)] + [24.0, 23.0, 22.0, 21.0, 16.0]
     opens = [close * 1.01 for close in closes]
     highs = [close + 1.0 for close in closes]
     lows = [close - 1.0 for close in closes]
-    highs[-3:] = [22.0, 21.5, 22.0]
-    lows[-3:] = [17.8, 17.6, 17.5]
     triggered, snapshot = strategy.evaluate(
         _make_ohlcv(closes, opens=opens, highs=highs, lows=lows)
     )
     assert triggered is True
-    assert snapshot["short_stoch"] <= 20
-    assert snapshot["long_stoch"] >= 60
+    assert snapshot["long_stoch"] < 30
+    assert snapshot["red_line_prev_21_max"] >= 80
 
-    reject_triggered, _ = strategy.evaluate(_make_ohlcv([10 + i * 0.2 for i in range(25)]))
+    reject_closes = [10 + i * 0.6 for i in range(25)]
+    reject_closes += [24.4 - (i + 1) * 0.3 for i in range(26)]
+    reject_closes += [18.0, 16.0]
+    reject_triggered, reject_snapshot = strategy.evaluate(_make_ohlcv(reject_closes))
     assert reject_triggered is False
+    assert reject_snapshot["long_stoch"] < 30
+    assert reject_snapshot["red_line_prev_21_max"] < 80
 
 
 def test_zhuan_trigger_and_reject():
